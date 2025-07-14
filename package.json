@@ -1,0 +1,23 @@
+{
+  "name": "fastapi-react-monorepo",
+  "private": true,
+  "scripts": {
+    "install:all": "python -m venv .venv && .venv\\Scripts\\python.exe -m pip install uv && .venv\\Scripts\\uv.exe pip install -e api && .venv\\Scripts\\python.exe -m pip install bcrypt passlib[bcrypt] python-dotenv && (cd web && npm install)",
+    "seed": ".venv\\Scripts\\python.exe api/scripts/seed_user.py",
+    "dev": "concurrently -n \"API,WEB\" -c \"cyan,magenta\" \".venv\\Scripts\\python.exe -m uvicorn api.app.main:app --reload --env-file .env\" \"npm --prefix web run dev\"",
+    "dev:backend": "python api/scripts/ensure_models.py && .venv\\Scripts\\python.exe -m uvicorn api.app.main:app --reload --env-file .env",
+    "dev:full": "concurrently -n \"API,WEB\" -c \"cyan,magenta\" \"npm run dev:backend\" \"npm --prefix web run dev\"",
+    "backend": ".venv\\Scripts\\python.exe -m uvicorn api.app.main:app --host 0.0.0.0 --port 8000 --env-file .env",
+    "backend:dev": ".venv\\Scripts\\python.exe -m uvicorn api.app.main:app --reload --host 0.0.0.0 --port 8000 --env-file .env",
+    "backend:fast": "set SKIP_BACKGROUND_TRAINING=1 && .venv\\Scripts\\python.exe -m uvicorn api.app.main:app --host 0.0.0.0 --port 8000 --env-file .env",
+    "frontend": "npm --prefix web run dev",
+    "ensure:models": "python api/scripts/ensure_models.py",
+    "test:self-healing": "python test_self_healing.py",
+    "test:import": "python test_import.py",
+    "build:web": "npm --prefix web run build",
+    "debug": "timeout /T 3 && curl -s http://127.0.0.1:8000/api/health && echo. && curl -s -X POST -d \"username=alice&password=secret\" -H \"Content-Type: application/x-www-form-urlencoded\" http://127.0.0.1:8000/api/token"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2"
+  }
+} 

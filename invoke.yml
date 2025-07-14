@@ -1,0 +1,14 @@
+# invoke.yml
+tasks:
+  dev:
+    - uv venv
+    - uv sync
+    - uvicorn api.app.main:app --reload
+  test:
+    - uv pip install pytest coverage
+    - pytest -q
+  lint:
+    - uv pip install black isort flake8
+    - black .
+    - isort .
+    - flake8
