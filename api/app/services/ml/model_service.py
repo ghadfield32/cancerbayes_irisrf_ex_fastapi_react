@@ -27,6 +27,67 @@ TRAINERS = {
     "breast_cancer_stub": train_breast_cancer_stub,
 }
 
+# ── NEW: Column name mapping for cancer predictions ─────────────────────────
+_BC_SNAKE_TO_SPACE = {
+    # Mean features
+    "mean_radius": "mean radius",
+    "mean_texture": "mean texture",
+    "mean_perimeter": "mean perimeter",
+    "mean_area": "mean area",
+    "mean_smoothness": "mean smoothness",
+    "mean_compactness": "mean compactness",
+    "mean_concavity": "mean concavity",
+    "mean_concave_points": "mean concave points",
+    "mean_symmetry": "mean symmetry",
+    "mean_fractal_dimension": "mean fractal dimension",
+    # SE features (standard error)
+    "se_radius": "radius error",
+    "se_texture": "texture error",
+    "se_perimeter": "perimeter error",
+    "se_area": "area error",
+    "se_smoothness": "smoothness error",
+    "se_compactness": "compactness error",
+    "se_concavity": "concavity error",
+    "se_concave_points": "concave points error",
+    "se_symmetry": "symmetry error",
+    "se_fractal_dimension": "fractal dimension error",
+    # Worst features
+    "worst_radius": "worst radius",
+    "worst_texture": "worst texture",
+    "worst_perimeter": "worst perimeter",
+    "worst_area": "worst area",
+    "worst_smoothness": "worst smoothness",
+    "worst_compactness": "worst compactness",
+    "worst_concavity": "worst concavity",
+    "worst_concave_points": "worst concave points",
+    "worst_symmetry": "worst symmetry",
+    "worst_fractal_dimension": "worst fractal dimension",
+}
+
+_BC_TRAINING_COLS = list(_BC_SNAKE_TO_SPACE.values())
+
+def _normalize_cancer_features(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Convert snake_case API columns to the space-separated column names
+    captured in the MLflow model signature.
+
+    Raises
+    ------
+    ValueError
+        When, after renaming, we still miss required columns.
+    """
+    logger.debug("Normalising cancer features – incoming cols=%s", list(df.columns))
+    df = df.rename(columns=_BC_SNAKE_TO_SPACE)
+    missing = [c for c in _BC_TRAINING_COLS if c not in df.columns]
+    if missing:
+        raise ValueError(
+            f"Input is missing required fields after normalisation: {missing}"
+        )
+    # keep only training columns and ordered correctly
+    df = df[_BC_TRAINING_COLS]
+    logger.debug("Normalised cols=%s", list(df.columns))
+    return df
+
 class ModelService:
     """
     Self-healing model service that loads existing models and schedules
@@ -270,11 +331,10 @@ class ModelService:
         Returns:
             Tuple of (predicted_labels, probabilities, uncertainty_intervals)
         """
-        # Determine which model to use
+        # 1️⃣  Select model (same logic as before) --------------------------
         if model_type == "bayes":
             model = self.models.get("breast_cancer_bayes")
             if not model:
-                # Fall back to stub model
                 model = self.models.get("breast_cancer_stub")
                 if not model:
                     raise RuntimeError("No cancer model available")
@@ -286,43 +346,40 @@ class ModelService:
         else:
             raise ValueError("model_type must be 'bayes' or 'stub'")
 
-        # Convert to DataFrame with proper column names
-        X_df = pd.DataFrame(features)
+        # 2️⃣  Build & normalise DataFrame ---------------------------------
+        raw_df = pd.DataFrame(features)
+        try:
+            X_df = _normalize_cancer_features(raw_df)
+        except ValueError as exc:
+            logger.error("Schema validation failed: %s", exc)
+            raise
 
-        # Get predictions
+        # 3️⃣  Predict ------------------------------------------------------
         if model_type == "bayes" and "breast_cancer_bayes" in self.models:
-            # Use Bayesian model with uncertainty
-            probs = model.predict(X_df)
+            probs = model.predict(X_df)           # returns shape (n,)
             labels = ["malignant" if p > 0.5 else "benign" for p in probs]
         else:
-            # Use stub model (sklearn LogisticRegression)
-            probs = model.predict_proba(X_df)[:, 1]  # Probability of malignant
+            probs = model.predict_proba(X_df)[:, 1]
             labels = ["malignant" if p > 0.5 else "benign" for p in probs]
 
-        # Compute uncertainty intervals if requested (Bayesian model only)
+        # 4️⃣  Credible intervals (optional) -------------------------------
         ci = None
-        if posterior_samples and model_type == "bayes" and "breast_cancer_bayes" in self.models:
+        if (
+            posterior_samples
+            and model_type == "bayes"
+            and "breast_cancer_bayes" in self.models
+        ):
             try:
-                # Access the underlying python model to get the trace
                 python_model = model.unwrap_python_model()
-
-                # Access posterior samples for uncertainty quantification
                 draws = python_model.trace.posterior
                 αg = draws["α_group"].stack(samples=("chain", "draw"))
                 β = draws["β"].stack(samples=("chain", "draw"))
-
-                # Get group indices and standardized features
-                g = python_model._group_index(X_df)
+                g = python_model._grp(X_df)  # Fixed method name
                 Xs = python_model.scaler.transform(X_df)
-
-                # Compute posterior predictive samples
-                logits = αg.values[:, g] + np.dot(β.values.T, Xs.T)      # shape (S, N)
+                logits = αg.values[:, g] + np.dot(β.values.T, Xs.T)
                 pp = 1 / (1 + np.exp(-logits))
-
-                # Compute 95% credible intervals
                 lo, hi = np.percentile(pp, [2.5, 97.5], axis=0)
                 ci = list(zip(lo.tolist(), hi.tolist()))
-
             except Exception as e:
                 logger.warning(f"Failed to compute uncertainty intervals: {e}")
                 ci = None
@@ -332,6 +389,7 @@ class ModelService:
 
 # Global singleton
 model_service = ModelService()
+
 
 
 

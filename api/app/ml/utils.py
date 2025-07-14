@@ -9,6 +9,7 @@ import subprocess
 import shlex
 import platform
 import glob
+import sys
 
 log = logging.getLogger(__name__)
 
@@ -75,78 +76,72 @@ def find_compiler() -> str | None:
 
 def configure_pytensor_compiler(compiler_path: str | None = None) -> bool:
     """
-    Configure PyTensor to use a specific compiler with MSVC-safe flags.
+    Configure PyTensor for ahead-of-time C-thunks *before* its first import.
+    Safe to call repeatedly; turns into a no-op if PyTensor is already live.
 
-    Args:
-        compiler_path: Path to compiler executable. If None, will search for one.
-
-    Returns:
-        bool: True if compiler was configured successfully, False otherwise
+    Returns
+    -------
+    bool
+        True when a compiler was configured (or already present); False when
+        we had to fall back to default (pure-python ops).
     """
-    try:
-        import pytensor  # late import so function can be called very early
-    except ImportError:
-        log.warning("PyTensor not available – cannot configure compiler")
+    import sys, os, platform, shutil, logging, subprocess, glob
+    log = logging.getLogger(__name__)
+
+    # ── CASE 1: PyTensor already imported – try a *runtime* tweak ────────────
+    if "pytensor" in sys.modules:
+        import pytensor
+        if hasattr(pytensor, "change_flags"):
+            try:
+                pytensor.change_flags(optimizer="fast_compile")
+                log.debug("PyTensor already initialised – changed flags (runtime)")
+            except Exception as exc:                       # noqa: broad-except
+                log.warning("PyTensor change_flags failed → %s", exc)
+        else:
+            log.debug("PyTensor.change_flags missing – probably ≤2.13 build")
+        return True  # Either way, nothing else to do
+
+    # ── CASE 2: module not yet imported – prepare env vars first ─────────────
+    # Use find_compiler directly (it's in the same module)
+    compiler_path = compiler_path or find_compiler()
+    if not compiler_path:
+        log.warning("No C/C++ compiler available – PyTensor will be pure-python.")
+        # Set empty cxx to silence warnings
+        os.environ["PYTENSOR_FLAGS"] = "cxx=,optimizer=fast_compile"
         return False
 
-    # 1️⃣ Resolve the compiler path ------------------------------------------------
-    if compiler_path is None:
-        compiler_path = find_compiler()
-    if compiler_path is None:
-        log.warning("No compiler found – PyTensor will fall back to defaults")
-        return False
-
-    # 2️⃣ Write settings into PyTensor's global config -----------------------------
     system_is_windows = platform.system() == "Windows"
-    basename = os.path.basename(compiler_path).lower()
 
-    if system_is_windows:
-        # Quote path so spaces in "Program Files (x86)" don't break the command line
-        pytensor.config.cxx = f'"{compiler_path}"'
+    # ── CRITICAL: Clean up problematic environment variables ───────────────────
+    # Remove XLA_FLAGS that contains invalid "--" value
+    if os.getenv("XLA_FLAGS") == "--":
+        os.environ.pop("XLA_FLAGS", None)
+        log.info("🧹 Cleaned up invalid XLA_FLAGS")
 
-        # If this *is* MSVC, strip every GCC flag and substitute safe disables
-        if "cl" in basename:
-            # MSVC understands /wdXXXX but not -Wno-…  ➜  map the common ones
-            pytensor.config.cxxflags = "/wd4100 /wd4244 /wd4267 /wd4996"
-            log.info("✅ Configured MSVC with safe warning suppressions")
+    # Clear any existing PyTensor environment variables to avoid conflicts
+    pytensor_env_vars = ["PYTENSOR_FLAGS", "PYTENSOR_CXX", "PYTENSOR_CXXFLAGS", 
+                        "THEANO_FLAGS", "THEANO_CXXFLAGS"]
+    for var in pytensor_env_vars:
+        if var in os.environ:
+            del os.environ[var]
+
+    # ── Set up PyTensor environment variables ─────────────────────────────────
+    if system_is_windows and "cl" in os.path.basename(compiler_path).lower():
+        # MSVC configuration
+        os.environ["PYTENSOR_CXX"] = f'"{compiler_path}"'
+        os.environ["PYTENSOR_CXXFLAGS"] = "/wd4100 /wd4244 /wd4267 /wd4996"
+        os.environ["PYTENSOR_FLAGS"] = "optimizer=fast_compile"
+        log.info(f"🔧 Configured MSVC: {compiler_path}")
     else:
-        pytensor.config.cxx = compiler_path  # GCC / Clang path is fine
+        # GCC/Clang configuration
+        os.environ["PYTENSOR_CXX"] = compiler_path
+        os.environ["PYTENSOR_FLAGS"] = "optimizer=fast_compile"
+        log.info(f"🔧 Configured GCC/Clang: {compiler_path}")
 
-    # 3️⃣ NUCLEAR OPTION: Blank ALL environment variables that PyTensor uses to inject flags
-    # PyTensor checks these environment variables in multiple places
-    flag_vars = [
-        "PYTENSOR_FLAGS",
-        "THEANO_FLAGS",  # Legacy but still checked
-        "PYTENSOR_CXXFLAGS",
-        "THEANO_CXXFLAGS",  # Legacy but still checked
-    ]
-
-    for var in flag_vars:
-        os.environ[var] = "cxxflags="
-
-    # 4️⃣ Additional PyTensor config overrides to prevent flag injection
-    if system_is_windows and "cl" in basename:
-        # Disable PyTensor's automatic flag injection
-        pytensor.config.mode = "FAST_COMPILE"  # Avoid some optimizations that inject flags
-        pytensor.config.optimizer = "fast_compile"  # Use simpler optimizer
-
-        # Set additional config to prevent GCC flag injection
-        pytensor.config.cmodule__compilation_warning = False
-        pytensor.config.cmodule__warn_no_version = False
-
-        # Force PyTensor to use our flags only
-        pytensor.config.cxxflags = "/wd4100 /wd4244 /wd4267 /wd4996"
-
-        log.info("🛡️ Applied nuclear option: disabled all GCC flag injection")
-
-    # 5️⃣ Optional verbose diagnostics --------------------------------------------
-    if os.getenv("DEBUG_COMPILER") == "1":
-        log.debug("PyTensor.cxx      = %s", pytensor.config.cxx)
-        log.debug("PyTensor.cxxflags = %s", getattr(pytensor.config, "cxxflags", ""))
-        log.debug("PYTENSOR_FLAGS    = %s", os.getenv("PYTENSOR_FLAGS", "NOT_SET"))
-        log.debug("THEANO_FLAGS      = %s", os.getenv("THEANO_FLAGS", "NOT_SET"))
-
-    log.info("🛠 PyTensor now uses compiler: %s", compiler_path)
+    # ── Import now: env vars take effect ─────────────────────────────────────
+    import pytensor  # noqa: E402
+    log.info("PyTensor configured with %s (fast_compile, device=%s)",
+             compiler_path, pytensor.config.device)
     return True
 
 def test_compiler_availability() -> dict:

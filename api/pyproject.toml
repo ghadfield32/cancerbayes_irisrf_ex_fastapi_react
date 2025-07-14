@@ -22,7 +22,8 @@ dependencies = [
     "arviz>=0.15.0",
     "requests>=2.31.0",
     "jax>=0.4.23",
-    "jaxlib>=0.4.23"
+    "jaxlib>=0.4.23",
+    "optuna>=3.0.0",
 ]
 
 [project.optional-dependencies]

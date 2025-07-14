@@ -23,14 +23,6 @@ import subprocess
 import os
 import platform
 
-# Conditional imports for heavy dependencies
-if os.getenv("UNIT_TESTING") != "1" and os.getenv("SKIP_BACKGROUND_TRAINING") != "1":
-    import pymc as pm
-    import arviz as az
-else:
-    pm = None
-    az = None
-
 # ── NEW: Configure MLflow to use local file storage ─────────────────────────
 # Set MLflow to use local file storage instead of remote server
 os.environ.setdefault("MLFLOW_TRACKING_URI", "file:./mlruns_local")
@@ -218,64 +210,127 @@ class _HierBayesLogReg(mlflow.pyfunc.PythonModel):
         return 1 / (1 + np.exp(-logits))
 
 def train_breast_cancer_bayes(
-    draws: int = 800,
-    tune: int = 400,
-    target_accept: float = 0.90,
+    draws: int = 500,      # Reduced from 800 for speed
+    tune: int = 200,       # Reduced from 400 for speed  
+    target_accept: float = 0.95,  # Increased for better convergence
 ) -> str:
     """
-    Train a hierarchical Bayesian logistic-regression model.
+    Train a hierarchical Bayesian logistic-regression model with optimizations.
 
-    *On Windows* we first configure PyTensor so MSVC builds succeed; if that
-    fails we raise – the caller will fall back to the stub model instead.
+    Key optimizations:
+    - Single-core sampling (Windows optimization)
+    - Reduced draws/tune for speed
+    - Higher target_accept for better convergence
+    - Automatic backend selection (NumPyro > PyMC)
+    - Environment cleanup for stability
     """
-    # ------------------------------------------------------------------ compiler
+    # ------------------------------------------------------------------ Environment cleanup
+    # Strip invalid flags that crash JAX
+    os.environ.pop("XLA_FLAGS", None)  # defensive – avoid "--"
+
+    # ------------------------------------------------------------------ Compiler configuration
     from app.ml.utils import find_compiler, configure_pytensor_compiler
 
+    logger.info("🔧 Configuring PyTensor compiler...")
     cxx = find_compiler()
-    if cxx is None or not configure_pytensor_compiler(cxx):
-        msg = (
-            "No compatible C/C++ compiler (or mis-configuration) – "
-            "skipping Bayesian build."
-        )
+    if cxx is None:
+        msg = "No compatible C/C++ compiler found – skipping Bayesian build."
         logger.warning("⚠️ %s", msg)
         raise RuntimeError(msg)
 
-    # ---------------------------------------------------------------- NumPyro opt
-    # If we *still* end up on MSVC we can opt-out of C-thunks entirely.
-    nuts_backend = (
-        "numpyro"
-        if platform.system() == "Windows" and "cl" in os.path.basename(cxx).lower()
-        else "nuts"
-    )
+    if not configure_pytensor_compiler(cxx):
+        msg = "PyTensor compiler configuration failed – skipping Bayesian build."
+        logger.warning("⚠️ %s", msg)
+        raise RuntimeError(msg)
 
-    # ------------------------------------------------------------------ modelling
-    import pymc as pm, pandas as pd, numpy as np
+    # ---------------------------------------------------------------- Optimized sampler selection
+    def _jax_available():
+        try:
+            import jax
+            jax.devices()
+            return True
+        except Exception:
+            return False
+
+    def _numpyro_available():
+        try:
+            import numpyro
+            return True
+        except ImportError:
+            return False
+
+    def _nutpie_available():
+        try:
+            import nutpie
+            return True
+        except ImportError:
+            return False
+
+    # Determine best available sampler with proper detection
+    if _jax_available() and _numpyro_available():
+        sampler_backend = "numpyro"
+        logger.info("✅ Using NumPyro backend (fastest)")
+    elif _nutpie_available():
+        sampler_backend = "nutpie"
+        logger.info("✅ Using NutPie backend (Stan-powered)")
+    else:
+        sampler_backend = "pymc"
+        logger.info("⚠️ Using PyMC backend (fallback)")
+
+    # ------------------------------------------------------------------ Modelling
+    logger.info("🧠 Building optimized hierarchical Bayesian model (backend=%s)…", sampler_backend)
+
+    # Import heavy libraries
+    import pymc as pm
+    import arviz as az
+    import pandas as pd
+    import numpy as np
     from sklearn.datasets import load_breast_cancer
     from sklearn.preprocessing import StandardScaler
-    import mlflow, tempfile, pickle, arviz as az
+    import mlflow
+    import tempfile
+    import pickle
 
+    # Prepare data
     X_df, y = load_breast_cancer(as_frame=True, return_X_y=True)
     quint, edges = pd.qcut(X_df["mean texture"], 5, labels=False, retbins=True)
     g = quint.astype("int64").to_numpy()
     scaler = StandardScaler().fit(X_df)
     Xs = scaler.transform(X_df)
 
-    logger.info("🧠 Building hierarchical Bayesian model (backend=%s)…", nuts_backend)
+    logger.info("🧠 Building optimized hierarchical Bayesian model (backend=%s)…", sampler_backend)
     with pm.Model() as mdl:
         α_group = pm.Normal("α_group", mu=0, sigma=1, shape=5)
         β = pm.Normal("β", mu=0, sigma=1, shape=Xs.shape[1])
         logits = α_group[g] + pm.math.dot(Xs, β)
         pm.Bernoulli("obs", logit_p=logits, observed=y)
-        trace = pm.sample(
-            draws=draws, tune=tune,
-            target_accept=target_accept,
-            nuts_sampler=nuts_backend,
-            progressbar=False,
-            chains=2, random_seed=123,
-        )
 
-    # ------------------------------------------------------------------ wrapping
-    class _HierBayesLogReg(mlflow.pyfunc.PythonModel):
+        # Optimized sampling parameters for Windows
+        sample_kwargs = {
+            "draws": draws,
+            "tune": tune,
+            "target_accept": target_accept,
+            "chains": 2,
+            "cores": 1,  # Single core to avoid Windows process spawn overhead
+            "progressbar": False,
+            "random_seed": 123,
+        }
+
+        # Only add nuts_sampler if not using default pymc
+        if sampler_backend != "pymc":
+            sample_kwargs["nuts_sampler"] = sampler_backend
+
+        try:
+            trace = pm.sample(**sample_kwargs)
+        except Exception as e:
+            logger.warning(f"Sampling with {sampler_backend} failed: {e}")
+            logger.info("🔄 Falling back to standard PyMC sampler...")
+            # Remove nuts_sampler for fallback
+            sample_kwargs.pop("nuts_sampler", None)
+            trace = pm.sample(**sample_kwargs)
+
+    # ------------------------------------------------------------------ Optimized wrapper
+    class _OptimizedHierBayesLogReg(mlflow.pyfunc.PythonModel):
         def __init__(self, trc, sc, edge, cols):
             self.trace, self.scaler, self.edges, self.cols = trc, sc, edge, cols
 
@@ -283,8 +338,8 @@ def train_breast_cancer_bayes(
             tex = df["mean texture"].to_numpy()
             return np.clip(np.digitize(tex, self.edges, right=False), 0, 4)
 
-        def predict(self, X, params=None):
-            df = X if isinstance(X, pd.DataFrame) else pd.DataFrame(X, columns=self.cols)
+        def predict(self, model_input, params=None):
+            df = model_input if isinstance(model_input, pd.DataFrame) else pd.DataFrame(model_input, columns=self.cols)
             Xs = self.scaler.transform(df)
             g = self._grp(df)
             αg = self.trace.posterior["α_group"].median(("chain", "draw")).values
@@ -292,17 +347,23 @@ def train_breast_cancer_bayes(
             lg = αg[g] + np.dot(Xs, β)
             return 1 / (1 + np.exp(-lg))
 
-    wrapper = _HierBayesLogReg(trace, scaler, edges[1:-1], X_df.columns.tolist())
+    wrapper = _OptimizedHierBayesLogReg(trace, scaler, edges[1:-1], X_df.columns.tolist())
     preds = (wrapper.predict(X_df) > 0.5).astype(int)
     acc = float((preds == y).mean())
 
-    # -------------------------------------------------------------------- MLflow
+    # -------------------------------------------------------------------- MLflow logging
     with tempfile.TemporaryDirectory() as td, mlflow.start_run(run_name="breast_cancer_bayes") as run:
         scaler_path = Path(td) / "scaler.pkl"
         with open(scaler_path, "wb") as fh:
             pickle.dump(scaler, fh)
 
-        mlflow.log_params({"draws": draws, "tune": tune, "target_accept": target_accept})
+        mlflow.log_params({
+            "draws": draws, 
+            "tune": tune, 
+            "target_accept": target_accept,
+            "sampler": sampler_backend,
+            "optimized": True
+        })
         mlflow.log_metric("accuracy", acc)
         mlflow.pyfunc.log_model(
             "model", python_model=wrapper,
@@ -311,5 +372,5 @@ def train_breast_cancer_bayes(
             input_example=X_df.head(),
             signature=mlflow.models.signature.infer_signature(X_df, wrapper.predict(X_df)),
         )
-        logger.info("📦 Bayesian model logged – run_id=%s  acc=%.3f", run.info.run_id, acc)
+        logger.info("📦 Optimized Bayesian model logged – run_id=%s  acc=%.3f", run.info.run_id, acc)
         return run.info.run_id
