@@ -125,6 +125,93 @@ def train_iris_random_forest(
         return run.info.run_id
 
 # -----------------------------------------------------------------------------
+#  IRIS – Logistic Regression (multinomial for 3-class classification)
+# -----------------------------------------------------------------------------
+def train_iris_logistic_regression(
+    max_iter: int = 400,
+    C: float = 1.0,
+    random_state: int = 42
+) -> str:
+    """
+    Train + register a multinomial Logistic Regression on the Iris data and push it to MLflow.
+    Returns the run_id (string).
+    """
+    from sklearn.linear_model import LogisticRegression
+
+    iris = load_iris(as_frame=True)
+    X, y = iris.data, iris.target
+    X_tr, X_te, y_tr, y_te = train_test_split(
+        X, y, test_size=0.25, stratify=y, random_state=random_state
+    )
+
+    # Multinomial logistic regression for 3-class classification
+    clf = LogisticRegression(
+        multi_class="multinomial",
+        solver="lbfgs",
+        max_iter=max_iter,
+        C=C,
+        n_jobs=-1,
+        random_state=random_state,
+    ).fit(X_tr, y_tr)
+
+    preds = clf.predict(X_te)
+    metrics = {
+        "accuracy": accuracy_score(y_te, preds),
+        "f1_macro": f1_score(y_te, preds, average="macro"),
+        "precision_macro": precision_score(y_te, preds, average="macro"),
+        "recall_macro": recall_score(y_te, preds, average="macro"),
+    }
+
+    with mlflow.start_run(run_name="iris_logistic_regression") as run:
+        # Log hyperparameters
+        mlflow.log_params({
+            "max_iter": max_iter,
+            "C": C,
+            "random_state": random_state
+        })
+
+        # Log metrics
+        mlflow.log_metrics(metrics)
+
+        # Create a custom pyfunc wrapper that exposes both predict and predict_proba
+        class IrisLogRegWrapper(mlflow.pyfunc.PythonModel):
+            def __init__(self, model):
+                self.model = model
+
+            def predict(self, model_input, params=None):
+                # Return class probabilities for pyfunc interface
+                # Convert to numpy array if it's a DataFrame
+                if hasattr(model_input, 'values'):
+                    X = model_input.values
+                else:
+                    X = model_input
+                return self.model.predict_proba(X)
+
+            def predict_proba(self, X):
+                # Expose predict_proba for direct access
+                if hasattr(X, 'values'):
+                    X = X.values
+                return self.model.predict_proba(X)
+
+            def predict_classes(self, X):
+                # Expose class prediction
+                if hasattr(X, 'values'):
+                    X = X.values
+                return self.model.predict(X)
+
+        iris_wrapper = IrisLogRegWrapper(clf)
+
+        # Log model with proper signature
+        mlflow.pyfunc.log_model(
+            artifact_path="model",
+            python_model=iris_wrapper,
+            registered_model_name="iris_logistic_regression",
+            input_example=X.head(),
+            signature=mlflow.models.signature.infer_signature(X, iris_wrapper.predict(X))
+        )
+        return run.info.run_id
+
+# -----------------------------------------------------------------------------
 #  BREAST-CANCER STUB – ultra-fast fallback model
 # -----------------------------------------------------------------------------
 def train_breast_cancer_stub(random_state: int = 42) -> str:

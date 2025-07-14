@@ -14,6 +14,7 @@ from mlflow.exceptions import MlflowException
 from app.core.config import settings
 from app.ml.builtin_trainers import (
     train_iris_random_forest,
+    train_iris_logistic_regression,
     train_breast_cancer_bayes,
     train_breast_cancer_stub,
 )
@@ -23,6 +24,7 @@ logger = logging.getLogger(__name__)
 # Trainer mapping for self-healing
 TRAINERS = {
     "iris_random_forest": train_iris_random_forest,
+    "iris_logistic_regression": train_iris_logistic_regression,
     "breast_cancer_bayes": train_breast_cancer_bayes,
     "breast_cancer_stub": train_breast_cancer_stub,
 }
@@ -107,6 +109,7 @@ class ModelService:
         self.models: Dict[str, Any] = {}
         self.status: Dict[str, str] = {
             "iris_random_forest": "missing",
+            "iris_logistic_regression": "missing",
             "breast_cancer_bayes": "missing",
             "breast_cancer_stub": "missing",
         }
@@ -147,6 +150,7 @@ class ModelService:
     async def _load_models(self) -> None:
         """Load existing models from MLflow."""
         await self._try_load("iris_random_forest")
+        await self._try_load("iris_logistic_regression")
         await self._try_load("breast_cancer_bayes")
         await self._try_load("breast_cancer_stub")
 
@@ -191,13 +195,20 @@ class ModelService:
                     self._train_and_reload("breast_cancer_bayes", train_breast_cancer_bayes)
                 )
 
-        # 5️⃣ Train iris if missing
+        # 5️⃣ Train iris models if missing
         if not await self._try_load("iris_random_forest"):
-            logger.info("Training iris model …")
+            logger.info("Training iris random forest model …")
             await asyncio.get_running_loop().run_in_executor(
                 self._EXECUTOR, train_iris_random_forest
             )
             await self._try_load("iris_random_forest")
+
+        if not await self._try_load("iris_logistic_regression"):
+            logger.info("Training iris logistic regression model …")
+            await asyncio.get_running_loop().run_in_executor(
+                self._EXECUTOR, train_iris_logistic_regression
+            )
+            await self._try_load("iris_logistic_regression")
 
     async def _try_load(self, name: str) -> None:
         """Try to load a model and update status."""
@@ -283,17 +294,22 @@ class ModelService:
 
         Args:
             features: List of iris measurements as dictionaries
-            model_type: Model type to use (only 'rf' supported)
+            model_type: Model type to use ('rf' or 'logreg')
 
         Returns:
             Tuple of (predicted_class_names, class_probabilities)
         """
-        if model_type != "rf":
-            raise ValueError("Only 'rf' supported for iris")
+        # Select model based on model_type
+        if model_type == "rf":
+            model_name = "iris_random_forest"
+        elif model_type == "logreg":
+            model_name = "iris_logistic_regression"
+        else:
+            raise ValueError("model_type must be 'rf' or 'logreg'")
 
-        model = self.models.get("iris_random_forest")
+        model = self.models.get(model_name)
         if not model:
-            raise RuntimeError("Iris model not loaded")
+            raise RuntimeError(f"{model_name} not loaded")
 
         # Convert to DataFrame with proper column names (matching training data)
         X_df = pd.DataFrame([{
@@ -303,7 +319,7 @@ class ModelService:
             "petal width (cm)": sample["petal_width"]
         } for sample in features])
 
-        # The iris model wrapper returns probabilities via predict() method
+        # Both model wrappers return probabilities via predict() method
         probs = model.predict(X_df)                  # shape (n, 3) - probabilities
         preds = probs.argmax(axis=1)                 # numerical class indices
 
@@ -389,9 +405,3 @@ class ModelService:
 
 # Global singleton
 model_service = ModelService()
-
-
-
-
-
-

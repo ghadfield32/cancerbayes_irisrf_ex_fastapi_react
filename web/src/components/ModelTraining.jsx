@@ -157,18 +157,6 @@ const ModelTraining = ({ dataset, onTrain, isTraining, setIsTraining }) => {
                   <CheckCircle className="h-5 w-5" />
                 </div>
               </div>
-
-              <div className="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
-                <div>
-                  <h5 className="font-medium text-gray-900">Logistic Regression</h5>
-                  <p className="text-sm text-gray-600">
-                    Baseline model for comparison
-                  </p>
-                </div>
-                <div className="text-green-600">
-                  <CheckCircle className="h-5 w-5" />
-                </div>
-              </div>
             </div>
           )}
         </div>
@@ -212,3 +200,4 @@ const ModelTraining = ({ dataset, onTrain, isTraining, setIsTraining }) => {
 };
 
 export default ModelTraining; 
+

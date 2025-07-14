@@ -267,30 +267,53 @@ async def predict_cancer(
     features = [sample.dict() for sample in request.samples]
     logger.debug(f"→ Cancer features: {features}")
 
-    # Get predictions
-    predictions, probabilities, uncertainties = await model_service.predict_cancer(
-        features=features,
-        model_type=request.model_type,
-        posterior_samples=request.posterior_samples
-    )
-    logger.debug(f"← Cancer predictions: {predictions}")
-    logger.debug(f"← Cancer probabilities: {probabilities}")
-    logger.debug(f"← Cancer uncertainties: {uncertainties}")
+    try:
+        # Get predictions
+        predictions, probabilities, uncertainties = await model_service.predict_cancer(
+            features=features,
+            model_type=request.model_type,
+            posterior_samples=request.posterior_samples
+        )
+        logger.debug(f"← Cancer predictions: {predictions}")
+        logger.debug(f"← Cancer probabilities: {probabilities}")
+        logger.debug(f"← Cancer uncertainties: {uncertainties}")
 
-    result = {
-        "predictions": predictions,
-        "probabilities": probabilities,
-        "uncertainties": uncertainties,
-        "input_received": request.samples
-    }
+        result = {
+            "predictions": predictions,
+            "probabilities": probabilities,
+            "uncertainties": uncertainties,
+            "input_received": request.samples
+        }
 
-    # Background task for audit logging
-    background_tasks.add_task(
-        logger.info,
-        f"[audit] user={current_user} endpoint=cancer input={request.samples} output={predictions}"
-    )
+        # Background task for audit logging
+        background_tasks.add_task(
+            logger.info,
+            f"[audit] user={current_user} endpoint=cancer input={request.samples} output={predictions}"
+        )
 
-    return CancerPredictResponse(**result) 
+        return CancerPredictResponse(**result)
+
+    except ValueError as exc:
+        # Handle feature validation errors
+        error_msg = str(exc)
+        if "missing required fields" in error_msg:
+            logger.error(f"Cancer prediction failed - missing features: {error_msg}")
+            raise HTTPException(
+                status_code=422,
+                detail=f"Invalid input: {error_msg}. Please ensure all 30 breast cancer features are provided with correct names."
+            )
+        else:
+            logger.error(f"Cancer prediction failed - validation error: {error_msg}")
+            raise HTTPException(
+                status_code=422,
+                detail=f"Invalid input format: {error_msg}"
+            )
+    except Exception as exc:
+        logger.error(f"Cancer prediction failed: {exc}")
+        raise HTTPException(
+            status_code=500,
+            detail="Internal server error during prediction"
+        )
 
 @app.get("/api/v1/debug/ready")
 async def debug_ready():
