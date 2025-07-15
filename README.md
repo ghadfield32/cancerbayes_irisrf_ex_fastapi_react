@@ -11,6 +11,7 @@ Follow the steps below to run everything locally with **Railway CLI** and then d
 - **Self-healing Model Service**: Automatically trains missing models in the background
 - **MLflow Integration**: Model versioning and deployment tracking
 - **Rate Limiting**: Redis-backed token bucket rate limiting with configurable limits per endpoint type
+- **Automated Garbage Collection**: Keeps Railway volumes tidy by pruning old runs and artifacts
 
 ### Why JAX/NumPyro?
 
@@ -77,6 +78,8 @@ nano .env         # or code .env / vim .env
 | `RATE_LIMIT_DEFAULT`   | `60`                           | Default requests per minute |
 | `RATE_LIMIT_CANCER`    | `30`                           | Cancer prediction limit   |
 | `RATE_LIMIT_LOGIN`     | `3`                            | Login attempts per 20s    |
+| `RETAIN_RUNS_PER_MODEL`| `5`                            | Keep N latest runs per model |
+| `MLFLOW_GC_AFTER_TRAIN`| `1`                            | Run garbage collection after training |
 
 ---
 
@@ -114,6 +117,9 @@ python test_pytensor_fix.py
 
 # Test Bayesian training
 python tests/test_bayesian_trainer.py
+
+# Test garbage collection
+python api/test_volume_cleanup.py
 ```
 
 ---
@@ -248,5 +254,167 @@ After deploying with the Volume:
 - **Pin versions**: Keep MLflow and PyMC versions consistent in `pyproject.toml`
 - **Monitor divergences**: Watch PyMC logs for convergence issues
 - **Backup volumes**: Railway volumes can be backed up for disaster recovery
+
+---
+
+## 🧹 MLflow Garbage Collection
+
+### Problem: Volume Space Management
+
+MLflow persists every run forever, so your Railway volume will fill up unless you prune old runs and artifacts.
+
+### Solution: Automated Cleanup
+
+The service now includes automated garbage collection:
+
+#### 1. Configuration
+
+Set these environment variables in your Railway service:
+
+```bash
+RETAIN_RUNS_PER_MODEL=5      # Keep the latest 5 runs per model
+MLFLOW_GC_AFTER_TRAIN=1      # Run garbage collection after each training
+```
+
+#### 2. How It Works
+
+After each successful model training:
+
+1. **List all runs** for that model (newest first)
+2. **Keep the latest N** (default: 5) runs
+3. **Delete older runs** via `MlflowClient.delete_run()`
+4. **Run `mlflow gc`** to purge artifact folders
+5. **Log disk usage** before/after cleanup
+
+#### 3. Manual Cleanup
+
+For store-wide cleanup (e.g., from Railway Cron Jobs):
+
+```bash
+python - <<'PY'
+from api.app.services.ml.model_service import model_service
+import asyncio, uvloop; uvloop.install()
+asyncio.run(model_service.vacuum_store())
+PY
+```
+
+#### 4. Railway Cron Job Setup
+
+Add a daily cron job in Railway:
+
+1. Go to your `api` service → **Cron Jobs** → **New Cron Job**
+2. Schedule: `0 2 * * *` (daily at 2 AM)
+3. Command:
+   ```bash
+   python -c "
+   from app.services.ml.model_service import model_service
+   import asyncio
+   asyncio.run(model_service.vacuum_store())
+   "
+   ```
+
+### Benefits
+
+- **Automatic cleanup**: No manual intervention required
+- **Configurable retention**: Adjust `RETAIN_RUNS_PER_MODEL` as needed
+- **Non-blocking**: Cleanup runs in background thread pool
+- **Resilient**: Failures never bubble up to API
+- **Transparent**: Detailed logging of cleanup operations
+
+### Monitoring
+
+Watch for these log messages:
+
+```
+🗑️  Pruned 3 old iris_random_forest runs; kept 5
+🧹 mlflow gc completed (45.23 MB → 12.45 MB)
+```
+
+### Testing
+
+Test the garbage collection locally:
+
+```bash
+cd api
+python test_volume_cleanup.py
+```
+
+### Volume Cleanup Verification
+
+#### How Cleanup Works
+
+1. **Retention Policy**: Keep the latest N runs per model (default: 5)
+2. **Pruning**: Delete older runs via `MlflowClient.delete_run()`
+3. **Garbage Collection**: Run `mlflow gc` to purge artifact folders
+4. **Background Execution**: Cleanup runs in thread pool, never blocks API
+
+#### Verification Steps
+
+**Local Testing**:
+```bash
+# Measure volume size
+du -sh mlruns_local
+
+# Run cleanup
+python -c "
+from app.services.ml.model_service import model_service
+import asyncio
+asyncio.run(model_service.vacuum_store())
+"
+
+# Measure again
+du -sh mlruns_local
+```
+
+**Python Script**:
+```python
+import os
+import shutil
+from app.services.ml.model_service import model_service
+import asyncio
+
+def folder_size(path):
+    total = 0
+    for root, dirs, files in os.walk(path):
+        for f in files:
+            total += os.path.getsize(os.path.join(root, f))
+    return total
+
+path = "mlruns_local"
+print("Before:", folder_size(path), "bytes")
+asyncio.run(model_service.vacuum_store())
+print("After: ", folder_size(path), "bytes")
+```
+
+#### Demo Script
+
+Run the cleanup demo to see it in action:
+
+```bash
+cd api
+python demo_cleanup.py
+```
+
+This will:
+1. Train multiple models to create runs
+2. Measure volume size before/after
+3. Run cleanup and show size reduction
+4. Display detailed statistics
+
+#### Railway Volume Monitoring
+
+When deployed with Railway volumes:
+
+- **Automatic cleanup**: Happens after each training
+- **Periodic vacuum**: Daily cron job for extra assurance
+- **Size monitoring**: Watch volume usage in Railway dashboard
+- **Log monitoring**: Look for cleanup messages in logs
+
+### Best Practices
+
+- **Keep retention low**: 5-10 runs per model to avoid disk exhaustion
+- **Monitor disk usage**: Set alerts for >80% volume capacity
+- **Use file store for dev**: Prevents leftover Docker volumes
+- **Test locally**: Use `test_volume_cleanup.py` to verify functionality
 
 Happy shipping! 🚂

@@ -3,9 +3,10 @@ Model service – self-healing startup with background training.
 """
 
 from __future__ import annotations
-import asyncio, logging, os, time, socket
+import asyncio, logging, os, time, socket, shutil, subprocess
 from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, Any, List, Tuple, Optional
+from pathlib import Path
 
 import mlflow, pandas as pd, numpy as np
 from mlflow.tracking import MlflowClient
@@ -243,6 +244,11 @@ class ModelService:
 
             self.models[name] = model
             self.status[name] = "loaded"
+
+            # Trigger retention clean‑up in background
+            loop = asyncio.get_running_loop()
+            loop.run_in_executor(self._EXECUTOR,
+                                 lambda: asyncio.run(self._cleanup_runs(name)))
             logger.info("✅ %s trained & loaded", name)
 
         except Exception as exc:
@@ -427,6 +433,71 @@ class ModelService:
                 ci = None
 
         return labels, probs.tolist(), ci
+
+    async def _cleanup_runs(self, model_name: str) -> None:
+        """
+        Keep the **newest N runs** for `model_name` and drop the rest, then
+        optionally invoke `mlflow gc` to purge artifact folders.
+
+        Runs marked *deleted* are still present on disk until GC executes,
+        so we always run GC when `settings.MLFLOW_GC_AFTER_TRAIN` is True.
+        """
+        keep = max(settings.RETAIN_RUNS_PER_MODEL, 0)
+        try:
+            # 1️⃣ fetch runs newest→oldest
+            runs = self.mlflow_client.search_runs(
+                experiment_ids=[exp.experiment_id for exp in self.mlflow_client.search_experiments()],
+                filter_string=f"tags.mlflow.runName = '{model_name}'",
+                order_by=["attributes.start_time DESC"],
+            )
+            if len(runs) <= keep:
+                logger.debug("No pruning needed for %s (runs=%d, keep=%d)",
+                             model_name, len(runs), keep)
+                return
+
+            to_delete = runs[keep:]
+            for r in to_delete:
+                self.mlflow_client.delete_run(r.info.run_id)
+            logger.info("🗑️  Pruned %d old %s runs; kept %d",
+                        len(to_delete), model_name, keep)
+
+            # 2️⃣ garbage‑collect artifacts
+            if settings.MLFLOW_GC_AFTER_TRAIN:
+                uri = mlflow.get_tracking_uri().removeprefix("file:")
+                before = shutil.disk_usage(uri).used
+                subprocess.run(
+                    ["mlflow", "gc",
+                     "--backend-store-uri", uri,
+                     "--artifact-store", uri],
+                    check=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
+                after = shutil.disk_usage(uri).used
+                logger.info("🧹 mlflow gc completed (%.2f MB → %.2f MB)",
+                            before/1e6, after/1e6)
+
+        except Exception as exc:
+            logger.warning("Cleanup for %s failed: %s", model_name, exc)
+
+    async def vacuum_store(self) -> None:
+        """Force a *store‑wide* `mlflow gc` (use from cron jobs)."""
+        try:
+            uri = mlflow.get_tracking_uri().removeprefix("file:")
+            before = shutil.disk_usage(uri).used
+            subprocess.run(
+                ["mlflow", "gc",
+                 "--backend-store-uri", uri,
+                 "--artifact-store", uri],
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            after = shutil.disk_usage(uri).used
+            logger.info("🧹 Store-wide vacuum completed (%.2f MB → %.2f MB)",
+                        before/1e6, after/1e6)
+        except Exception as exc:
+            logger.warning("Store vacuum failed: %s", exc)
 
 
 # Global singleton

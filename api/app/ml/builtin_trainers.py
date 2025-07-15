@@ -31,14 +31,33 @@ else:
     pm = None
     az = None
 
-# ── NEW: Configure MLflow to use local file storage ─────────────────────────
-# Set MLflow to use local file storage instead of remote server
-os.environ.setdefault("MLFLOW_TRACKING_URI", "file:./mlruns_local")
-os.environ.setdefault("MLFLOW_REGISTRY_URI", "file:./mlruns_local")
+# ------------------------------------------------------------------
+# Honour whatever Settings or the shell already provided; then
+# fall back if the host part cannot be resolved quickly.
+# ------------------------------------------------------------------
+from urllib.parse import urlparse
+import socket, time
 
-# Configure MLflow tracking URI immediately
-mlflow.set_tracking_uri("file:./mlruns_local")
-# ──────────────────────────────────────────────────────────────────────────────
+def _fast_resolve(uri: str) -> bool:
+    if uri.startswith("http"):
+        host = urlparse(uri).hostname
+        try:
+            t0 = time.perf_counter()
+            socket.getaddrinfo(host, None, proto=socket.IPPROTO_TCP)
+            return (time.perf_counter() - t0) < 0.05
+        except socket.gaierror:
+            return False
+    return True
+
+uri = os.getenv("MLFLOW_TRACKING_URI")
+if not uri or not _fast_resolve(uri):
+    uri = "file:./mlruns_local"
+
+os.environ["MLFLOW_TRACKING_URI"] = uri
+os.environ.setdefault("MLFLOW_REGISTRY_URI", uri)
+
+mlflow.set_tracking_uri(uri)
+logger.info("📦 Trainers using MLflow @ %s", uri)
 
 MLFLOW_EXPERIMENT = "ml_fullstack_models"
 
