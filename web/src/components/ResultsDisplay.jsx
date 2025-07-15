@@ -76,9 +76,9 @@ const ResultsDisplay = ({ predictions, dataset, isLoading }) => {
   };
 
   const renderCancerResults = () => {
-    const prediction = predictions.predictions[0];
+    const prediction  = predictions.predictions[0]?.toLowerCase();   // 'malignant' | 'benign'
     const probability = predictions.probabilities[0];
-    const isMalignant = prediction === 'M';
+    const isMalignant = prediction.startsWith('m');  // works for full word or 'M'
 
     return (
       <div className="space-y-4">

@@ -14,24 +14,18 @@ from mlflow.exceptions import MlflowException
 from app.core.config import settings
 from app.ml.builtin_trainers import (
     train_iris_random_forest,
-    train_iris_logistic_regression,
+    train_iris_logreg,  # NEW
     train_breast_cancer_bayes,
     train_breast_cancer_stub,
 )
 
 logger = logging.getLogger(__name__)
 
-# Trainer mapping for self-healing
-TRAINERS = {
-    "iris_random_forest": train_iris_random_forest,
-    "iris_logistic_regression": train_iris_logistic_regression,
-    "breast_cancer_bayes": train_breast_cancer_bayes,
-    "breast_cancer_stub": train_breast_cancer_stub,
-}
-
-# ── NEW: Column name mapping for cancer predictions ─────────────────────────
-_BC_SNAKE_TO_SPACE = {
-    # Mean features
+# ---------------------------------------------------------------------------
+# Cancer column mapping: Pydantic field names ➜ training column names
+# ---------------------------------------------------------------------------
+_CANCER_COLMAP: dict[str, str] = {
+    # Means
     "mean_radius": "mean radius",
     "mean_texture": "mean texture",
     "mean_perimeter": "mean perimeter",
@@ -42,7 +36,7 @@ _BC_SNAKE_TO_SPACE = {
     "mean_concave_points": "mean concave points",
     "mean_symmetry": "mean symmetry",
     "mean_fractal_dimension": "mean fractal dimension",
-    # SE features (standard error)
+    # SE
     "se_radius": "radius error",
     "se_texture": "texture error",
     "se_perimeter": "perimeter error",
@@ -53,7 +47,7 @@ _BC_SNAKE_TO_SPACE = {
     "se_concave_points": "concave points error",
     "se_symmetry": "symmetry error",
     "se_fractal_dimension": "fractal dimension error",
-    # Worst features
+    # Worst
     "worst_radius": "worst radius",
     "worst_texture": "worst texture",
     "worst_perimeter": "worst perimeter",
@@ -66,29 +60,20 @@ _BC_SNAKE_TO_SPACE = {
     "worst_fractal_dimension": "worst fractal dimension",
 }
 
-_BC_TRAINING_COLS = list(_BC_SNAKE_TO_SPACE.values())
-
-def _normalize_cancer_features(df: pd.DataFrame) -> pd.DataFrame:
+def _rename_cancer_columns(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Convert snake_case API columns to the space-separated column names
-    captured in the MLflow model signature.
-
-    Raises
-    ------
-    ValueError
-        When, after renaming, we still miss required columns.
+    Ensure DataFrame columns match the training schema used by MLflow artefacts.
+    Unknown columns are left untouched so legacy models still work.
     """
-    logger.debug("Normalising cancer features – incoming cols=%s", list(df.columns))
-    df = df.rename(columns=_BC_SNAKE_TO_SPACE)
-    missing = [c for c in _BC_TRAINING_COLS if c not in df.columns]
-    if missing:
-        raise ValueError(
-            f"Input is missing required fields after normalisation: {missing}"
-        )
-    # keep only training columns and ordered correctly
-    df = df[_BC_TRAINING_COLS]
-    logger.debug("Normalised cols=%s", list(df.columns))
-    return df
+    return df.rename(columns=_CANCER_COLMAP)
+
+# Trainer mapping for self-healing
+TRAINERS = {
+    "iris_random_forest": train_iris_random_forest,
+    "iris_logreg":        train_iris_logreg,  # NEW
+    "breast_cancer_bayes": train_breast_cancer_bayes,
+    "breast_cancer_stub":  train_breast_cancer_stub,
+}
 
 class ModelService:
     """
@@ -109,7 +94,7 @@ class ModelService:
         self.models: Dict[str, Any] = {}
         self.status: Dict[str, str] = {
             "iris_random_forest": "missing",
-            "iris_logistic_regression": "missing",
+            "iris_logreg":        "missing",  # NEW
             "breast_cancer_bayes": "missing",
             "breast_cancer_stub": "missing",
         }
@@ -122,6 +107,15 @@ class ModelService:
         """
         if self.initialized:
             return
+
+        # Log critical dependency versions for diagnostics
+        try:
+            import pytensor
+            logger.info("📦 PyTensor version: %s", pytensor.__version__)
+        except ImportError:
+            logger.warning("⚠️  PyTensor not available")
+        except Exception as e:
+            logger.warning("⚠️  Could not determine PyTensor version: %s", e)
 
         def _needs_fallback(client) -> bool:
             # any missing attr is a strong signal we are on mlflow-skinny
@@ -149,10 +143,12 @@ class ModelService:
 
     async def _load_models(self) -> None:
         """Load existing models from MLflow."""
-        await self._try_load("iris_random_forest")
-        await self._try_load("iris_logistic_regression")
-        await self._try_load("breast_cancer_bayes")
-        await self._try_load("breast_cancer_stub")
+        for name in ["iris_random_forest", "iris_logreg",
+                     "breast_cancer_bayes", "breast_cancer_stub"]:
+            try:
+                await self._try_load(name)
+            except Exception as exc:
+                logger.error("❌  load %s failed: %s", name, exc)
 
     async def startup(self, auto_train: bool | None = None) -> None:
         """
@@ -169,6 +165,7 @@ class ModelService:
             logger.warning("⏩ SKIP_BACKGROUND_TRAINING=1 – models will load on-demand")
             # We still *try* to load existing artefacts so prod works
             await self._try_load("iris_random_forest")
+            await self._try_load("iris_logreg")
             await self._try_load("breast_cancer_bayes")
             return
 
@@ -177,6 +174,7 @@ class ModelService:
 
         # 1️⃣ try to load whatever already exists
         await self._try_load("iris_random_forest")
+        await self._try_load("iris_logreg")
 
         # 2️⃣ Load bayes – if exists we're done
         if not await self._try_load("breast_cancer_bayes"):
@@ -197,28 +195,35 @@ class ModelService:
 
         # 5️⃣ Train iris models if missing
         if not await self._try_load("iris_random_forest"):
-            logger.info("Training iris random forest model …")
+            logger.info("Training iris random-forest …")
             await asyncio.get_running_loop().run_in_executor(
                 self._EXECUTOR, train_iris_random_forest
             )
             await self._try_load("iris_random_forest")
 
-        if not await self._try_load("iris_logistic_regression"):
-            logger.info("Training iris logistic regression model …")
+        if not await self._try_load("iris_logreg"):
+            logger.info("Training iris logistic-regression …")
             await asyncio.get_running_loop().run_in_executor(
-                self._EXECUTOR, train_iris_logistic_regression
+                self._EXECUTOR, train_iris_logreg
             )
-            await self._try_load("iris_logistic_regression")
+            await self._try_load("iris_logreg")
 
-    async def _try_load(self, name: str) -> None:
+    async def _try_load(self, name: str) -> bool:
         """Try to load a model and update status."""
-        model = await self._load_production_model(name)
-        if model:
-            self.models[name] = model
-            self.status[name] = "loaded"
-            logger.info("✅ %s loaded", name)
-            return True
-        return False
+        try:
+            model = await self._load_production_model(name)
+            if model:
+                self.models[name] = model
+                self.status[name] = "loaded"
+                logger.info("✅ %s loaded", name)
+                return True
+            self.status.setdefault(name, "missing")
+            return False
+        except Exception as exc:
+            logger.error("❌  load %s failed: %s", name, exc)
+            self.status[name] = "failed"
+            self.status[f"{name}_last_error"] = str(exc)
+            return False
 
     async def _train_and_reload(self, name: str, trainer) -> None:
         """Train a model in background and reload it, with verbose phase logs."""
@@ -248,9 +253,9 @@ class ModelService:
 
     async def _load_production_model(self, name: str) -> Optional[Any]:
         """
-        1. Registry 'Production' stage → load.  
-        2. Otherwise most recent run with runName == name.
-        Returns None if not found.
+        Return the Production-stage model if its *artifacts* are present.
+        Falls back to the most recent run, and returns None when
+        artifacts are missing instead of propagating MlflowException.
         """
         try:
             versions = self.mlflow_client.search_model_versions(f"name='{name}'")
@@ -259,21 +264,26 @@ class ModelService:
                 uri = f"models:/{name}/{prod[0].version}"
                 logger.info("↪︎  Loading %s from registry:%s", name, prod[0].version)
                 return mlflow.pyfunc.load_model(uri)
-        except MlflowException:
-            pass
+        except (MlflowException, FileNotFoundError, OSError) as exc:
+            # 404-style errors: artefact path vanished – log & continue
+            logger.warning("🗂️  %s production artefact missing: %s", name, exc)
+            return None
 
-        # Fallback – scan experiments for latest run
-        runs = []
-        for exp in self.mlflow_client.search_experiments():
-            runs.extend(self.mlflow_client.search_runs(
-                [exp.experiment_id],
-                f"tags.mlflow.runName = '{name}'",
-                order_by=["attributes.start_time DESC"],
-                max_results=1))
-        if runs:
-            uri = f"runs:/{runs[0].info.run_id}/model"
-            logger.info("↪︎  Loading %s from latest run:%s", name, runs[0].info.run_id)
-            return mlflow.pyfunc.load_model(uri)
+        # Fallback – latest run
+        try:
+            runs = []
+            for exp in self.mlflow_client.search_experiments():
+                runs.extend(self.mlflow_client.search_runs(
+                    [exp.experiment_id],
+                    f"tags.mlflow.runName = '{name}'",
+                    order_by=["attributes.start_time DESC"],
+                    max_results=1))
+            if runs:
+                uri = f"runs:/{runs[0].info.run_id}/model"
+                logger.info("↪︎  Loading %s from latest run:%s", name, runs[0].info.run_id)
+                return mlflow.pyfunc.load_model(uri)
+        except (MlflowException, FileNotFoundError, OSError) as exc:
+            logger.warning("🗂️  %s latest-run artefact missing: %s", name, exc)
         return None
 
     # Manual training endpoints (for UI)
@@ -294,19 +304,15 @@ class ModelService:
 
         Args:
             features: List of iris measurements as dictionaries
-            model_type: Model type to use ('rf' or 'logreg')
+            model_type: Model type to use (only 'rf' supported)
 
         Returns:
             Tuple of (predicted_class_names, class_probabilities)
         """
-        # Select model based on model_type
-        if model_type == "rf":
-            model_name = "iris_random_forest"
-        elif model_type == "logreg":
-            model_name = "iris_logistic_regression"
-        else:
+        if model_type not in ("rf", "logreg"):
             raise ValueError("model_type must be 'rf' or 'logreg'")
 
+        model_name = "iris_random_forest" if model_type == "rf" else "iris_logreg"
         model = self.models.get(model_name)
         if not model:
             raise RuntimeError(f"{model_name} not loaded")
@@ -319,8 +325,17 @@ class ModelService:
             "petal width (cm)": sample["petal_width"]
         } for sample in features])
 
-        # Both model wrappers return probabilities via predict() method
-        probs = model.predict(X_df)                  # shape (n, 3) - probabilities
+        # Obtain probabilities in a backward-compatible way
+        if hasattr(model, "predict_proba"):
+            probs = model.predict_proba(X_df)
+        else:
+            # Legacy artefact – derive 1-hot probas from class indices
+            preds_idx = model.predict(X_df)
+            import numpy as _np
+            probs = _np.zeros((len(preds_idx), 3), dtype=float)
+            probs[_np.arange(len(preds_idx)), preds_idx.astype(int)] = 1.0
+
+        # Ensure numpy array then list list
         preds = probs.argmax(axis=1)                 # numerical class indices
 
         # Map numerical classes to species names
@@ -347,10 +362,11 @@ class ModelService:
         Returns:
             Tuple of (predicted_labels, probabilities, uncertainty_intervals)
         """
-        # 1️⃣  Select model (same logic as before) --------------------------
+        # Determine which model to use
         if model_type == "bayes":
             model = self.models.get("breast_cancer_bayes")
             if not model:
+                # Fall back to stub model
                 model = self.models.get("breast_cancer_stub")
                 if not model:
                     raise RuntimeError("No cancer model available")
@@ -362,40 +378,50 @@ class ModelService:
         else:
             raise ValueError("model_type must be 'bayes' or 'stub'")
 
-        # 2️⃣  Build & normalise DataFrame ---------------------------------
-        raw_df = pd.DataFrame(features)
-        try:
-            X_df = _normalize_cancer_features(raw_df)
-        except ValueError as exc:
-            logger.error("Schema validation failed: %s", exc)
-            raise
+        # Convert to DataFrame with proper column names
+        X_df_raw = pd.DataFrame(features)
+        X_df = _rename_cancer_columns(X_df_raw)
 
-        # 3️⃣  Predict ------------------------------------------------------
+        # Get predictions
         if model_type == "bayes" and "breast_cancer_bayes" in self.models:
-            probs = model.predict(X_df)           # returns shape (n,)
+            # Use Bayesian model with uncertainty
+            probs = model.predict(X_df)
             labels = ["malignant" if p > 0.5 else "benign" for p in probs]
         else:
-            probs = model.predict_proba(X_df)[:, 1]
+            # Use stub model (sklearn LogisticRegression)
+            if hasattr(model, "predict_proba"):
+                probs_full = model.predict_proba(X_df)
+                probs = probs_full[:, 1]
+            else:
+                # Legacy artefact: model.predict returns hard class 0/1
+                preds_bin = model.predict(X_df).astype(float)
+                probs = preds_bin  # deterministic 0/1 acts as prob
             labels = ["malignant" if p > 0.5 else "benign" for p in probs]
 
-        # 4️⃣  Credible intervals (optional) -------------------------------
+        # Compute uncertainty intervals if requested (Bayesian model only)
         ci = None
-        if (
-            posterior_samples
-            and model_type == "bayes"
-            and "breast_cancer_bayes" in self.models
-        ):
+        if posterior_samples and model_type == "bayes" and "breast_cancer_bayes" in self.models:
             try:
+                # Access the underlying python model to get the trace
                 python_model = model.unwrap_python_model()
+
+                # Access posterior samples for uncertainty quantification
                 draws = python_model.trace.posterior
                 αg = draws["α_group"].stack(samples=("chain", "draw"))
                 β = draws["β"].stack(samples=("chain", "draw"))
-                g = python_model._grp(X_df)  # Fixed method name
+
+                # Get group indices and standardized features
+                g = python_model._group_index(X_df)
                 Xs = python_model.scaler.transform(X_df)
-                logits = αg.values[:, g] + np.dot(β.values.T, Xs.T)
+
+                # Compute posterior predictive samples
+                logits = αg.values[:, g] + np.dot(β.values.T, Xs.T)      # shape (S, N)
                 pp = 1 / (1 + np.exp(-logits))
+
+                # Compute 95% credible intervals
                 lo, hi = np.percentile(pp, [2.5, 97.5], axis=0)
                 ci = list(zip(lo.tolist(), hi.tolist()))
+
             except Exception as e:
                 logger.warning(f"Failed to compute uncertainty intervals: {e}")
                 ci = None

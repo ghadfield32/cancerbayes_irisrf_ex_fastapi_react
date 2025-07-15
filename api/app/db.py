@@ -6,6 +6,8 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
     async_sessionmaker,
 )
+from fastapi_limiter import FastAPILimiter
+import redis.asyncio as redis
 from .models import Base
 from .services.ml.model_service import model_service
 from .core.config import settings
@@ -31,7 +33,15 @@ def get_app_ready():
 # ---------------------------------------------------------------------------
 @asynccontextmanager
 async def lifespan(app):
-    """Open & dispose engine at app startup/shutdown; create all tables."""
+    """
+    Application lifespan context-manager.
+
+    * creates DB tables
+    * initialises ML models
+    * (NEW) wires Redis-backed rate-limiter
+    * sets global _app_ready flag
+    * disposes resources on shutdown
+    """
     global _app_ready
 
     logger.info("🗄️  Initializing database…  URL=%s", DATABASE_URL)
@@ -40,6 +50,26 @@ async def lifespan(app):
             # DDL is safe here; it blocks startup until complete
             await conn.run_sync(Base.metadata.create_all)
         logger.info("✅ Database tables created/verified successfully")
+
+        # ── NEW: Initialize FastAPI-Limiter BEFORE serving traffic ──────────
+        try:
+            redis_conn = redis.from_url(
+                settings.REDIS_URL,
+                encoding="utf-8",
+                decode_responses=True,
+            )
+            await FastAPILimiter.init(redis_conn, prefix="ratelimit")
+            logger.info("🚦 Rate-limiter initialised (Redis %s)", settings.REDIS_URL)
+
+            # Optional: clean slate for CI
+            if os.getenv("FLUSH_TEST_LIMITS") == "1":
+                try:
+                    flushed = await redis_conn.flushdb()
+                    logger.info("🧹 Redis FLUSHDB executed for test run, status=%s", flushed)
+                except Exception as e:
+                    logger.warning("Could not flush Redis in test mode: %s", e)
+        except Exception as e:
+            logger.warning("⚠️  Rate-limiter init failed: %s – continuing without limits", e)
 
         # Initialize application readiness
         logger.info("🚀 Startup event starting - _app_ready=%s", _app_ready)
@@ -75,7 +105,11 @@ async def lifespan(app):
         logger.info("🎯 Lifespan startup complete - _app_ready=%s", _app_ready)
         yield
     finally:
-        logger.info("🔒 Disposing database engine…")
+        logger.info("🔒 Shutting down…")
+        try:
+            await FastAPILimiter.close()           # NEW – graceful shutdown
+        except Exception:
+            pass
         await engine.dispose()
 
 # ---------------------------------------------------------------------------

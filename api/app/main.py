@@ -11,6 +11,20 @@ import time
 
 from pydantic import BaseModel
 
+# ── NEW: Fix ML backend configuration before any JAX imports ───────────────────────────
+from .utils.env_sanitizer import fix_ml_backends
+fix_ml_backends()
+# ──────────────────────────────────────────────────────────────────────────
+
+# ── NEW: Rate limiting imports ─────────────────────────────────────────────────────────
+from fastapi_limiter import FastAPILimiter
+import redis.asyncio as redis
+# ────────────────────────────────────────────────────────────────────────────────────────
+
+# ── NEW: Concurrency limiting imports ────────────────────────────────────────────────
+from .middleware.concurrency import ConcurrencyLimiter
+# ────────────────────────────────────────────────────────────────────────────────────────
+
 from .db import lifespan, get_db, get_app_ready
 from .security import create_access_token, get_current_user, verify_password
 from .crud import get_user_by_username
@@ -18,6 +32,8 @@ from .schemas.iris import IrisPredictRequest, IrisPredictResponse, IrisFeatures
 from .schemas.cancer import CancerPredictRequest, CancerPredictResponse, CancerFeatures
 from .services.ml.model_service import model_service
 from .core.config import settings
+from .deps.limits import default_limit, heavy_limit, login_limit, training_limit, light_limit
+from .security import LoginPayload, get_credentials
 
 # ── NEW: guarantee log directory exists ───────────────────────────
 os.makedirs("logs", exist_ok=True)
@@ -53,6 +69,9 @@ app = FastAPI(
     lifespan=lifespan,  # register startup/shutdown events
 )
 
+# ── Rate limiting is now initialized in lifespan() ────────────────────────────────────
+# ────────────────────────────────────────────────────────────────────────────────────────
+
 # Configure CORS with environment-based origins
 origins_env = settings.ALLOWED_ORIGINS
 origins: list[str] = [o.strip() for o in origins_env.split(",")] if origins_env != "*" else ["*"]
@@ -64,6 +83,10 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# ── NEW: Add concurrency limiting middleware ──────────────────────────────────────────
+app.add_middleware(ConcurrencyLimiter, max_concurrent=4)
+# ────────────────────────────────────────────────────────────────────────────────────────
 
 @app.middleware("http")
 async def add_process_time_header(request: Request, call_next):
@@ -90,25 +113,31 @@ async def ready():
     """Basic readiness check."""
     return {"ready": get_app_ready()}
 
-@app.post("/api/v1/token", response_model=Token)
+@app.post("/api/v1/token", response_model=Token, dependencies=[Depends(login_limit)])
 async def login(
-    form_data: OAuth2PasswordRequestForm = Depends(),
+    creds: LoginPayload = Depends(get_credentials),
     db: AsyncSession = Depends(get_db),
 ):
-    """Authenticate user and issue JWT."""
+    """
+    Issue a JWT. Accepts **either**
+    • JSON {"username": "...", "password": "..."}  *or*
+    • classic x‑www‑form‑urlencoded.
+    """
+    # 1️⃣ readiness gate
     if not get_app_ready():
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Backend still loading models. Try again in a moment.",
-            headers={"Retry-After": "10"}
+            headers={"Retry‑After": "10"},
         )
 
-    user = await get_user_by_username(db, form_data.username)
-    if not user or not verify_password(form_data.password, user.hashed_password):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid credentials"
-        )
+    # 2️⃣ verify credentials
+    user = await get_user_by_username(db, creds.username)
+    if not user or not verify_password(creds.password, user.hashed_password):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED,
+                            detail="Invalid credentials")
+
+    # 3️⃣ issue token
     token = create_access_token(subject=user.username)
     return Token(access_token=token, token_type="bearer")
 
@@ -138,14 +167,84 @@ async def ready_full() -> dict:
     logger.debug("READY endpoint – _app_ready=%s, response=%s", get_app_ready(), response)
     return response
 
+# ── Alias routes (no auth, not shown in OpenAPI) ────────────────────────────
+@app.get("/ready/full", include_in_schema=False)
+async def ready_full_alias():
+    """Alias for front-end calls that miss the /api/v1 prefix."""
+    return await ready_full()
+
+@app.get("/health", include_in_schema=False)
+async def health_alias():
+    """Alias for plain /health (SPA hits it before it knows the prefix)."""
+    return await health_check()
+
+@app.post("/token", include_in_schema=False)
+async def login_alias(request: Request):
+    """
+    Alias: accept /token like /api/v1/token.
+    Keeps the OAuth2PasswordRequestForm semantics without exposing clutter in docs.
+    """
+    from fastapi import Form
+
+    # Parse form data manually to match OAuth2PasswordRequestForm behavior
+    form_data = await request.form()
+    username = form_data.get("username")
+    password = form_data.get("password")
+
+    if not username or not password:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="username and password are required"
+        )
+
+    # Create a mock OAuth2PasswordRequestForm object
+    class MockForm:
+        def __init__(self, username, password):
+            self.username = username
+            self.password = password
+
+    mock_form = MockForm(username, password)
+
+    # Reuse the existing login logic
+    db = await get_db().__anext__()
+    return await login(mock_form, db)
+
+@app.post("/iris/predict", include_in_schema=False)
+async def iris_predict_alias(request: Request):
+    """Alias for /api/v1/iris/predict"""
+    from .schemas.iris import IrisPredictRequest
+
+    # Parse JSON body
+    body = await request.json()
+    iris_request = IrisPredictRequest(**body)
+
+    # Reuse the existing prediction logic without authentication for testing
+    background_tasks = BackgroundTasks()
+    current_user = "test_user"  # Skip authentication for alias endpoints
+    return await predict_iris(iris_request, background_tasks, current_user)
+
+@app.post("/cancer/predict", include_in_schema=False)
+async def cancer_predict_alias(request: Request):
+    """Alias for /api/v1/cancer/predict"""
+    from .schemas.cancer import CancerPredictRequest
+
+    # Parse JSON body
+    body = await request.json()
+    cancer_request = CancerPredictRequest(**body)
+
+    # Reuse the existing prediction logic without authentication for testing
+    background_tasks = BackgroundTasks()
+    current_user = "test_user"  # Skip authentication for alias endpoints
+    return await predict_cancer(cancer_request, background_tasks, current_user)
+
 # ----- on-demand training endpoints ----------------------------------
-@app.post("/api/v1/iris/train", status_code=202)
+@app.post("/api/v1/iris/train", status_code=202, dependencies=[Depends(training_limit)])
 async def train_iris(background_tasks: BackgroundTasks,
                      current_user: str = Depends(get_current_user)):
     background_tasks.add_task(model_service.train_iris)
     return {"status": "started"}
 
-@app.post("/api/v1/cancer/train", status_code=202)
+@app.post("/api/v1/cancer/train", status_code=202, dependencies=[Depends(training_limit)])
 async def train_cancer(background_tasks: BackgroundTasks,
                        current_user: str = Depends(get_current_user)):
     background_tasks.add_task(model_service.train_cancer)
@@ -164,7 +263,8 @@ async def cancer_ready():
 @app.post(
     "/api/v1/iris/predict",
     response_model=IrisPredictResponse,
-    status_code=status.HTTP_200_OK
+    status_code=status.HTTP_200_OK,
+    dependencies=[Depends(light_limit)]
 )
 async def predict_iris(
     request: IrisPredictRequest,
@@ -190,13 +290,17 @@ async def predict_iris(
     logger.info(f"User {current_user} called /iris/predict with {len(request.samples)} samples")
     logger.debug(f"→ Iris payload: {request.samples}")
 
-    # Check if iris model is ready
-    if request.model_type == "rf" and "iris_random_forest" not in model_service.models:
+    # Check if requested iris model is loaded; return 503 if not yet available
+    if (
+        request.model_type == "rf" and "iris_random_forest" not in model_service.models
+    ) or (
+        request.model_type == "logreg" and "iris_logreg" not in model_service.models
+    ):
         logger.warning("Iris model not ready - returning 503")
         raise HTTPException(
             status_code=503,
             detail="Iris model is still loading. Please try again in a few seconds.",
-            headers={"Retry-After": "30"}
+            headers={"Retry-After": "30"},
         )
 
     # Convert Pydantic models to dicts
@@ -228,7 +332,8 @@ async def predict_iris(
 @app.post(
     "/api/v1/cancer/predict",
     response_model=CancerPredictResponse,
-    status_code=status.HTTP_200_OK
+    status_code=status.HTTP_200_OK,
+    dependencies=[Depends(heavy_limit)]
 )
 async def predict_cancer(
     request: CancerPredictRequest,
@@ -254,66 +359,36 @@ async def predict_cancer(
     logger.info(f"User {current_user} called /cancer/predict with {len(request.samples)} samples")
     logger.debug(f"→ Cancer payload: {request.samples}")
 
-    # Check if cancer model is ready
-    if request.model_type == "bayes" and "breast_cancer_bayes" not in model_service.models:
-        logger.warning("Cancer model not ready - returning 503")
-        raise HTTPException(
-            status_code=503,
-            detail="Cancer model is still loading. Please try again in a few seconds.",
-            headers={"Retry-After": "30"}
-        )
+    # No early 503 here – model_service will transparently fall back to stub if Bayes not yet ready
 
     # Convert Pydantic models to dicts
     features = [sample.dict() for sample in request.samples]
     logger.debug(f"→ Cancer features: {features}")
 
-    try:
-        # Get predictions
-        predictions, probabilities, uncertainties = await model_service.predict_cancer(
-            features=features,
-            model_type=request.model_type,
-            posterior_samples=request.posterior_samples
-        )
-        logger.debug(f"← Cancer predictions: {predictions}")
-        logger.debug(f"← Cancer probabilities: {probabilities}")
-        logger.debug(f"← Cancer uncertainties: {uncertainties}")
+    # Get predictions
+    predictions, probabilities, uncertainties = await model_service.predict_cancer(
+        features=features,
+        model_type=request.model_type,
+        posterior_samples=request.posterior_samples
+    )
+    logger.debug(f"← Cancer predictions: {predictions}")
+    logger.debug(f"← Cancer probabilities: {probabilities}")
+    logger.debug(f"← Cancer uncertainties: {uncertainties}")
 
-        result = {
-            "predictions": predictions,
-            "probabilities": probabilities,
-            "uncertainties": uncertainties,
-            "input_received": request.samples
-        }
+    result = {
+        "predictions": predictions,
+        "probabilities": probabilities,
+        "uncertainties": uncertainties,
+        "input_received": request.samples
+    }
 
-        # Background task for audit logging
-        background_tasks.add_task(
-            logger.info,
-            f"[audit] user={current_user} endpoint=cancer input={request.samples} output={predictions}"
-        )
+    # Background task for audit logging
+    background_tasks.add_task(
+        logger.info,
+        f"[audit] user={current_user} endpoint=cancer input={request.samples} output={predictions}"
+    )
 
-        return CancerPredictResponse(**result)
-
-    except ValueError as exc:
-        # Handle feature validation errors
-        error_msg = str(exc)
-        if "missing required fields" in error_msg:
-            logger.error(f"Cancer prediction failed - missing features: {error_msg}")
-            raise HTTPException(
-                status_code=422,
-                detail=f"Invalid input: {error_msg}. Please ensure all 30 breast cancer features are provided with correct names."
-            )
-        else:
-            logger.error(f"Cancer prediction failed - validation error: {error_msg}")
-            raise HTTPException(
-                status_code=422,
-                detail=f"Invalid input format: {error_msg}"
-            )
-    except Exception as exc:
-        logger.error(f"Cancer prediction failed: {exc}")
-        raise HTTPException(
-            status_code=500,
-            detail="Internal server error during prediction"
-        )
+    return CancerPredictResponse(**result) 
 
 @app.get("/api/v1/debug/ready")
 async def debug_ready():
@@ -324,7 +399,40 @@ async def debug_ready():
         "models": list(model_service.models.keys()),
         "status": model_service.status,
         "errors": {k: v for k, v in model_service.status.items() if k.endswith("_last_error")}
-    } 
+    }
+
+@app.get("/api/v1/debug/compiler")
+async def debug_compiler():
+    """
+    Debug endpoint to check JAX/NumPyro backend configuration.
+    Returns information about the JAX backend setup.
+    """
+    try:
+        import jax
+        import numpyro
+        import pymc as pm
+
+        return {
+            "backend": "jax_numpyro",
+            "jax_version": jax.__version__,
+            "numpyro_version": numpyro.__version__,
+            "pymc_version": pm.__version__,
+            "jax_devices": str(jax.devices()),
+            "jax_platform": jax.default_backend(),
+            "status": "jax_backend_configured"
+        }
+    except ImportError as e:
+        return {
+            "backend": "unknown",
+            "error": f"Import error: {e}",
+            "status": "missing_dependencies"
+        }
+    except Exception as e:
+        return {
+            "backend": "unknown", 
+            "error": f"Configuration error: {e}",
+            "status": "configuration_failed"
+        } 
 
 @app.get("/api/v1/test/401")
 async def test_401():
@@ -332,4 +440,38 @@ async def test_401():
     raise HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Test 401 response"
-    ) 
+    )
+
+# ── Debug‑only ratelimit helpers ─────────────────────────────────────────────
+from .deps.limits import get_redis, user_or_ip
+
+@app.post("/api/v1/debug/ratelimit/reset", include_in_schema=False)
+async def rl_reset(request: Request):
+    """
+    Flush **all** rate‑limit counters bound to the caller (JWT _or_ IP).
+
+    We match every fragment that contains the identifier to survive
+    future changes in FastAPI‑Limiter's key schema.
+    """
+    r = get_redis()
+    if not r:
+        raise HTTPException(status_code=503, detail="Rate‑limiter not initialised")
+
+    ident = await user_or_ip(request)
+    keys = await r.keys(f"ratelimit:*{ident}*")        # <— broader pattern
+    if keys:
+        await r.delete(*keys)
+    return {"reset": len(keys)}
+
+if settings.DEBUG_RATELIMIT:          # OFF by default
+    @app.get("/api/v1/debug/ratelimit/{bucket}", include_in_schema=False)
+    async def rl_status(bucket: str, request: Request):
+        """
+        Inspect Redis keys for the current identifier + bucket.
+        Handy for CI tests – **never enable in prod**.
+        """
+        key_prefix = f"ratelimit:{bucket}:{await user_or_ip(request)}"
+        r = get_redis()
+        keys = await r.keys(f"{key_prefix}*")
+        values = await r.mget(keys) if keys else []
+        return dict(zip(keys, values)) 

@@ -21,6 +21,10 @@ env | grep -E 'RAILWAY_|PORT|DATABASE_URL' | sed 's/SECRET_KEY=.*/SECRET_KEY=***
 # ── one-shot DB migrate + seed (blocks until done) ---------------------------
 python -m scripts.seed_user
 
+# ── pre-train models (optional, non-blocking) --------------------------------
+echo "🏗️  Pre-training models..."
+python -m api.scripts.ensure_models || echo "⚠️  pre-train failed – stub will load"
+
 # ── run the API --------------------------------------------------------------
 exec uvicorn app.main:app \
   --host 0.0.0.0 --port "$PORT" \

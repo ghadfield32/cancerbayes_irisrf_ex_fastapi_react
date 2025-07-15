@@ -6,11 +6,14 @@ export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), '')
   const raw = env.VITE_API_URL || 
               (mode === 'production'
-                ? 'https://fastapi-production-1d13.up.railway.app/api/v1'
-                : 'http://127.0.0.1:8000/api/v1')
+                ? 'https://fastapi-production-1d13.up.railway.app'
+                : 'http://127.0.0.1:8000')
 
-  /** Prepend https:// if the scheme is missing */
-  const API_URL = /^https?:\/\//.test(raw) ? raw.replace(/\/+$/, '') : `https://${raw}`
+  // ── NEW: always tack on /api/v1 exactly once ─────────────────────
+  const withPrefix = raw.replace(/\/+$/, '')      // trim trailing /
+  const API_URL = withPrefix.endsWith('/api/v1')
+    ? withPrefix
+    : `${withPrefix}/api/v1`
 
   // Final sanity-check – bail if still invalid
   if (!/^https?:\/\/[^/]+/.test(API_URL)) {
@@ -75,4 +78,5 @@ export default defineConfig(({ mode }) => {
     }
   }
 })
+
 

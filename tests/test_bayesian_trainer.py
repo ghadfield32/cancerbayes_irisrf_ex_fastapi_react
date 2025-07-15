@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Standalone test script for the Bayesian breast cancer trainer.
-Run this to verify the PyTensor configuration and training works correctly.
+Run this to verify the JAX/NumPyro configuration and training works correctly.
 """
 
 import os
@@ -19,31 +19,31 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-def test_compiler_configuration():
-    """Test the PyTensor compiler configuration."""
-    logger.info("🔧 Testing PyTensor compiler configuration...")
+def test_jax_backend():
+    """Test that JAX and NumPyro are available and working."""
+    logger.info("🔧 Testing JAX/NumPyro backend...")
 
-    from app.ml.utils import find_compiler, configure_pytensor_compiler
-
-    # Test compiler discovery
-    cxx = find_compiler()
-    if cxx:
-        logger.info(f"✅ Found compiler: {cxx}")
-    else:
-        logger.error("❌ No compiler found")
-        return False
-
-    # Test PyTensor configuration
-    if configure_pytensor_compiler(cxx):
-        logger.info("✅ PyTensor configuration successful")
+    try:
+        import jax
+        import numpyro
+        import pymc as pm
+        
+        logger.info(f"✅ JAX version: {jax.__version__}")
+        logger.info(f"✅ NumPyro version: {numpyro.__version__}")
+        logger.info(f"✅ PyMC version: {pm.__version__}")
+        logger.info(f"✅ JAX devices: {jax.devices()}")
+        logger.info(f"✅ JAX platform: {jax.default_backend()}")
         return True
-    else:
-        logger.error("❌ PyTensor configuration failed")
+    except ImportError as e:
+        logger.error(f"❌ JAX/NumPyro import failed: {e}")
+        return False
+    except Exception as e:
+        logger.error(f"❌ JAX/NumPyro configuration failed: {e}")
         return False
 
 def test_bayesian_training():
-    """Test the Bayesian training function."""
-    logger.info("🧠 Testing Bayesian training...")
+    """Test the Bayesian training function with JAX backend."""
+    logger.info("🧠 Testing Bayesian training with JAX backend...")
 
     try:
         from app.ml.builtin_trainers import train_breast_cancer_bayes
@@ -51,8 +51,8 @@ def test_bayesian_training():
         # Test with smaller parameters for faster testing
         start_time = time.time()
         run_id = train_breast_cancer_bayes(
-            draws=200,      # Reduced from 800
-            tune=100,       # Reduced from 400
+            draws=200,      # Reduced from 1000
+            tune=100,       # Reduced from 1000
             target_accept=0.9
         )
         elapsed = time.time() - start_time
@@ -92,11 +92,11 @@ def test_stub_training():
 
 def main():
     """Run all tests."""
-    logger.info("🚀 Starting Bayesian trainer tests...")
+    logger.info("🚀 Starting Bayesian trainer tests with JAX backend...")
 
-    # Test 1: Compiler configuration
-    if not test_compiler_configuration():
-        logger.error("❌ Compiler configuration test failed")
+    # Test 1: JAX backend availability
+    if not test_jax_backend():
+        logger.error("❌ JAX backend test failed")
         return 1
 
     # Test 2: Stub training (should always work)

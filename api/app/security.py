@@ -3,7 +3,7 @@ import os, logging, secrets
 from datetime import datetime, timedelta
 from typing import Optional
 
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, status, Request
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from jose import jwt, JWTError
 from passlib.context import CryptContext
@@ -31,6 +31,50 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/token")
 
 class TokenData(BaseModel):
     username: Optional[str] = None
+
+class LoginPayload(BaseModel):
+    username: str
+    password: str
+
+async def get_credentials(request: Request) -> LoginPayload:
+    """
+    Accept either JSON **or** classic form‑encoded credentials.
+
+    Order of precedence:
+    1. If the request media‑type is JSON → parse it with Pydantic.
+    2. Else parse as form-encoded data.
+    """
+    content_type = request.headers.get("content-type", "")
+
+    if content_type.startswith("application/json"):
+        # JSON branch
+        try:
+            body = await request.json()
+            return LoginPayload(**body)
+        except Exception as e:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"Invalid JSON credentials: {e}",
+            )
+    else:
+        # Form-encoded branch
+        try:
+            form_data = await request.form()
+            username = form_data.get("username")
+            password = form_data.get("password")
+
+            if not username or not password:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail="username and password are required"
+                )
+
+            return LoginPayload(username=username, password=password)
+        except Exception as e:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"Invalid form credentials: {e}",
+            )
 
 def verify_password(raw: str, hashed: str) -> bool:
     return pwd_ctx.verify(raw, hashed)

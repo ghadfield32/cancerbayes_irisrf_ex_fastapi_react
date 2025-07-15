@@ -7,6 +7,17 @@ import CancerForm from './CancerForm';
 import ResultsDisplay from './ResultsDisplay';
 import ModelTraining from './ModelTraining';
 
+// 🆕 Friendly name helper ------------------------------------------
+const prettyModelName = (key) => {
+  switch (key) {
+    case 'iris_random_forest':   return 'Iris – Random Forest';
+    case 'iris_logreg':          return 'Iris – Logistic Regression';
+    case 'breast_cancer_bayes':  return 'Breast Cancer – Bayesian (PyMC)';
+    case 'breast_cancer_stub':   return 'Breast Cancer – Stub LogReg';
+    default:                     return key.replace(/_/g, ' ');
+  }
+};
+
 const MLModelFrontend = () => {
   const [selectedDataset, setSelectedDataset] = useState('iris');
   const [predictions, setPredictions] = useState(null);
@@ -174,7 +185,7 @@ const MLModelFrontend = () => {
             {Object.entries(modelStatus).map(([model, status]) => (
               <div key={model} className="flex items-center justify-between p-2 bg-gray-50 rounded">
                 <span className="text-sm font-medium text-gray-700">
-                  {model === 'iris_random_forest' ? 'Iris Model' : 'Cancer Model'}
+                  {prettyModelName(model)}
                 </span>
                 <span className={`text-xs px-2 py-1 rounded-full ${
                   status === 'loaded' ? 'bg-green-100 text-green-800' :
