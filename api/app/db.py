@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import (
     async_sessionmaker,
 )
 from fastapi_limiter import FastAPILimiter
-import redis.asyncio as redis
+from redis import asyncio as redis
 from .models import Base
 from .services.ml.model_service import model_service
 from .core.config import settings
@@ -52,24 +52,36 @@ async def lifespan(app):
         logger.info("✅ Database tables created/verified successfully")
 
         # ── NEW: Initialize FastAPI-Limiter BEFORE serving traffic ──────────
-        try:
-            redis_conn = redis.from_url(
-                settings.REDIS_URL,
-                encoding="utf-8",
-                decode_responses=True,
-            )
-            await FastAPILimiter.init(redis_conn, prefix="ratelimit")
-            logger.info("🚦 Rate-limiter initialised (Redis %s)", settings.REDIS_URL)
+        if settings.ENABLE_RATE_LIMIT:
+            try:
+                # 1️⃣ Check for an explicit REDIS_URL env var (Railway will supply this)
+                env_url = os.getenv("REDIS_URL")
 
-            # Optional: clean slate for CI
-            if os.getenv("FLUSH_TEST_LIMITS") == "1":
-                try:
-                    flushed = await redis_conn.flushdb()
-                    logger.info("🧹 Redis FLUSHDB executed for test run, status=%s", flushed)
-                except Exception as e:
-                    logger.warning("Could not flush Redis in test mode: %s", e)
-        except Exception as e:
-            logger.warning("⚠️  Rate-limiter init failed: %s – continuing without limits", e)
+                # 2️⃣ In production, prefer the env var; else use settings.REDIS_URL
+                if settings.ENVIRONMENT_CANONICAL == "production" and env_url:
+                    redis_url = env_url
+                else:
+                    redis_url = settings.REDIS_URL
+
+                redis_conn = redis.from_url(
+                    redis_url,
+                    encoding="utf-8",
+                    decode_responses=True,
+                )
+                await FastAPILimiter.init(redis_conn, prefix="ratelimit")
+                logger.info("🚦 Rate-limiter initialised (Redis %s)", redis_url)
+
+                # Optional: clean slate for CI
+                if os.getenv("FLUSH_TEST_LIMITS") == "1":
+                    try:
+                        flushed = await redis_conn.flushdb()
+                        logger.info("🧹 Redis FLUSHDB executed for test run, status=%s", flushed)
+                    except Exception as e:
+                        logger.warning("Could not flush Redis in test mode: %s", e)
+            except Exception as e:
+                logger.warning("⚠️  Rate-limiter init failed: %s – continuing without limits", e)
+        else:
+            logger.info("⚠️  Rate limiting disabled by config")
 
         # Initialize application readiness
         logger.info("🚀 Startup event starting - _app_ready=%s", _app_ready)
@@ -119,4 +131,5 @@ async def get_db() -> AsyncSession:
     """Yield a new DB session per request."""
     async with AsyncSessionLocal() as session:
         yield session
+
 

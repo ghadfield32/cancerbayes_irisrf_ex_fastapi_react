@@ -1,27 +1,27 @@
 // web/src/services/api.js
 import toast from 'react-hot-toast';     // add toast here for 401 handler
 
-// ─────────── Base URL ─────────────────────────────────────────────
-// VITE_API_URL should be *just* the API root (e.g. http://127.0.0.1:8000/api/v1)
+// Resolve API base from build-time (import.meta.env + defined constant)
 const API_BASE_URL = (() => {
-  // ① grab compile-time value if present
-  const raw = (typeof __API_URL__ !== 'undefined' && __API_URL__) || '';
+  const envURL   = import.meta.env?.VITE_API_URL || ''
+  const buildURL = (typeof __BUILD_API_URL__ !== 'undefined' && __BUILD_API_URL__) || ''
+  const chosenRaw = envURL || buildURL
 
-  // 🔍 DEBUG: Log the raw value
-  console.warn('[ApiService] __API_URL__ raw value:', raw);
-
-  // ② keep only valid absolute URLs, trim trailing slash
-  const baseURL = (/^https?:\/\//.test(raw) ? raw : '').replace(/\/+$/, '');
-
-  // 🔍 DEBUG: Log the processed baseURL
-  console.warn('[ApiService] processed baseURL:', baseURL);
-
-  // ③ HARD-FALLBACK for dev bundles that missed the define-plugin
-  if (!baseURL) {
-    console.warn('[ApiService] __API_URL__ missing – falling back to /api/v1');
-    return '/api/v1';
+  let base = chosenRaw.replace(/\/+$/, '')
+  if (base && !/\/api\/v1$/.test(base)) {
+    base = base + '/api/v1'
   }
-  return baseURL;
+
+  if (!base) {
+    console.warn('[ApiService] No VITE_API_URL provided – falling back to /api/v1 (DEV ONLY)')
+    return '/api/v1'
+  }
+
+  console.log('[ApiService] Resolved API base:', {
+    envURL, buildURL, final: base
+  })
+
+  return base
 })();
 
 // ─────────── Helper to join paths safely ─────────────────────────
@@ -38,19 +38,17 @@ class ApiService {
   }
 
   async request(endpoint, options = {}) {
-    // If endpoint already contains /api/v1 we don't want it twice
-    const cleanEndpoint = endpoint.replace(/^\/?api\/v1\//, '');
-    const url = join(this.baseURL, cleanEndpoint);
-    const token = localStorage.getItem('jwt');
+    // Avoid repeating /api/v1 if caller passes it
+    const cleanEndpoint = endpoint.replace(/^\/?api\/v1\//, '')
+    const url = join(this.baseURL, cleanEndpoint)
+    const token = localStorage.getItem('jwt')
 
-    // 🔍 DEBUG: Log URL construction details
-    console.warn('[ApiService] request debug:', {
-      baseURL: this.baseURL,
-      endpoint: endpoint,
-      cleanEndpoint: cleanEndpoint,
-      finalURL: url,
-      method: options.method || 'GET'
-    });
+    console.debug('[API Request]', {
+      method: options.method || 'GET',
+      endpoint,
+      cleanEndpoint,
+      url
+    })
 
     const cfg = {
       method: options.method || 'GET',
@@ -62,81 +60,72 @@ class ApiService {
       }
     };
 
-    console.debug(`🔍 [API] ${cfg.method} ${url}`);
-
     try {
-      const res = await fetch(url, cfg);
+      const res = await fetch(url, cfg)
 
-      /* ── Rate limiting header handling ───────────────────────── */
-      const rateLimitRemaining = res.headers.get('X-RateLimit-Remaining');
-      const rateLimitLimit = res.headers.get('X-RateLimit-Limit');
-      const retryAfter = res.headers.get('Retry-After');
+      const rateLimitRemaining = res.headers.get('X-RateLimit-Remaining')
+      const rateLimitLimit = res.headers.get('X-RateLimit-Limit')
+      const retryAfter = res.headers.get('Retry-After')
 
       if (rateLimitRemaining !== null) {
-        const remaining = parseInt(rateLimitRemaining);
-        const limit = parseInt(rateLimitLimit);
-
-        // Show warning when rate limit is getting low
+        const remaining = parseInt(rateLimitRemaining, 10)
+        const limit = parseInt(rateLimitLimit, 10)
         if (remaining <= 3 && remaining > 0) {
-          toast.warning(`Rate limit warning: ${remaining}/${limit} requests remaining`);
+          toast.warning(`Rate limit warning: ${remaining}/${limit} remaining`)
         }
-
-        // Log rate limit info for debugging
-        console.debug(`🔍 [API] Rate limit: ${remaining}/${limit} remaining`);
+        console.debug(`[API] Rate limit: ${remaining}/${limit}`)
       }
 
-      /* ── automatic session expiry handling ─────────────── */
       if (res.status === 401) {
-        localStorage.removeItem('jwt');
-        toast.error('Session expired – please log in again.');
-        window.location.replace('/login');
-        return;
+        localStorage.removeItem('jwt')
+        toast.error('Session expired – please log in again.')
+        window.location.replace('/login')
+        return
       }
 
-      /* ── Rate limit exceeded handling ─────────────────────── */
       if (res.status === 429) {
-        const retrySeconds = retryAfter ? parseInt(retryAfter) : 60;
-        toast.error(`Rate limit exceeded. Please wait ${retrySeconds} seconds before trying again.`);
-        throw new Error(`Rate limit exceeded. Retry after ${retrySeconds} seconds.`);
+        const retrySeconds = retryAfter ? parseInt(retryAfter, 10) : 60
+        toast.error(`Rate limit exceeded. Wait ${retrySeconds}s.`)
+        throw new Error(`429 retry after ${retrySeconds}s`)
       }
 
       if (!res.ok) {
-        const text = await res.text();
-        console.error(`❌ [API] ${res.status} ${url} – ${text}`);
-        throw new Error(`${res.status}: ${text}`);
+        const text = await res.text()
+        console.error(`❌ [API] ${res.status} ${url} – ${text}`)
+        throw new Error(`${res.status}: ${text}`)
       }
-      return res.status !== 204 ? res.json() : null;
+
+      return res.status !== 204 ? res.json() : null
     } catch (err) {
-      console.error(`❌ [API] Failed request to ${url}:`, err);
-      throw err;
+      console.error('❌ [API] Request failed:', err)
+      throw err
     }
   }
 
-  /* ── Health & Readiness helpers ─────────────────────────────── */
-  getHealth() { return this.request('/health'); }
-  getReady() { return this.request('/ready/full'); }
-  getHello() { return this.request('/hello'); }
+  // Convenience wrappers
+  getHealth()        { return this.request('/health') }
+  getReady()         { return this.request('/ready/frontend') }
+  getReadyFull()     { return this.request('/ready/full') }
+  getHello()         { return this.request('/hello') }
 
-  /* ── Authentication ─────────────────────────────────────────── */
   login(credentials) {
     const body = new URLSearchParams({
       username: credentials.username,
       password: credentials.password
-    });
+    })
     return this.request('/token', {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body
-    });
+    })
   }
 
-  /* ── ML Prediction helpers ─────────────────────────────────── */
   predictIris(payload) {
     return this.request('/iris/predict', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload)
-    });
+    })
   }
 
   predictCancer(payload) {
@@ -144,22 +133,27 @@ class ApiService {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload)
-    });
+    })
   }
 
-  /* ── Training helpers ─────────────────────────────────────── */
-  trainIris() { return this.request('/iris/train', { method: 'POST' }); }
-  trainCancer() { return this.request('/cancer/train', { method: 'POST' }); }
+  trainIris(modelType = 'rf') {
+    return this.request('/iris/train', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model_type: modelType })
+    })
+  }
 
-  /* ── Test helpers ─────────────────────────────────────────── */
-  test401() { return this.request('/test/401'); }  // For testing 401 handling
+  trainCancer(modelType = 'bayes') {
+    return this.request('/cancer/train', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model_type: modelType })
+    })
+  }
+
+  test401() { return this.request('/test/401') }
 }
 
 export const apiService = new ApiService();
 export default apiService;
-
-
-
-
-
-

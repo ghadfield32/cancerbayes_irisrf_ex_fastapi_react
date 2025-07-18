@@ -1,0 +1,54 @@
+railway steps:
+git clone repo
+copy environment variables to .env files in api/web/local for testing
+test it locally with the npm commands, ensure env variables and everything is set
+setup railway environment
+	- create new environment
+	- create 2 endpoints within from the cloned repo
+	- in both goto settings and select change Root under the directory root at the top
+		- change one to api/ and set up there env variables from the Variables tab and Raw Editor >
+			- set up an external domain in the api endpoint, then input that as a env variable for the web(react) endpoint 						vite_api_url="<external domain>/api/v1"
+				- for example: VITE_API_URL="https://example-production.up.railway.app/api/v1"
+			- go into GitHub and copy the rest of the .env variables from within api/ folder
+		- change the other to web/ and set up there env variables from the Variables tab and Raw Editor >
+			- go into GitHub and copy the rest of the .env variables from within web/ folder
+	- create another endpoint from a redis template
+	- right click on the background of the workspace and click, "create volume"
+		- attach to the api endpoint
+		- input, "/data/mlruns"
+		- ensure that these are in the api endpoints env variables (this volume is self cleaning, we will never keep more than the amount 			allotted, this could also be kept locally if you'd rather in a mlruns_local/ that we use locally, just take ml_runs out of .gitignore and 		ensure it's the env variable in both railway and locally
+	- update USERNAME_KEY and USER_PASSWORD in env variables to whatever username and password you want
+
+set up railway cli:
+	- railway login
+		- if that doesn't work, goto the railway env and get a railway token from settings > tokens
+		- Remove-Item -Force "$Env:USERPROFILE\.railway\config.json"
+		- Test-Path "$Env:USERPROFILE\.railway\config.json"  # should return False
+		- Remove-Item Env:RAILWAY_TOKEN   -ErrorAction SilentlyContinue
+		- Remove-Item Env:RAILWAY_API_TOKEN -ErrorAction SilentlyContinue
+		- Get a profile level token and use $Env:RAILWAY_API_TOKEN = '<token>'
+		- railway logout
+		- railway whoami
+		- railway login
+- link both api and web by:
+	- cd api; railway link 
+		- scroll down to the workspace you created
+		- scroll to the endpoint you created for api
+		- test by using railway run npm run backend
+	- cd web; railway link
+		- scroll down to the workspace you created
+		- scroll to the endpoint you created for api
+		- test by using railway run npm run dev
+			- ensure all prediction buttons and training buttons are set up correctly 
+- push to GitHub and therefore to railway prod
+	- let the endpoints build and then go into react endpoint and test to ensure the frontend is built correctly
+	- easily change the username/password within the env variables
+
+
+ENSURE:
+- update vite_api_url in deployment to the external domain with api/v1 on the end so for example: 
+	- VITE_API_URL="https://example-production.up.railway.app/api/v1"
+- update USERNAME_KEY and USER_PASSWORD to whatever username and password you want
+
+
+

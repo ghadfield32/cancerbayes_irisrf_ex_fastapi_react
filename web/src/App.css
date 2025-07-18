@@ -49,6 +49,12 @@
 
 .spinner {
   animation: spin 1s linear infinite;
+  /* Fallback size and styling in case Tailwind doesn't process */
+  width: 2.5rem;
+  height: 2.5rem;
+  border: 4px solid #e5e7eb;
+  border-top-color: #2563eb;
+  border-radius: 50%;
 }
 
 /* Responsive text sizing */

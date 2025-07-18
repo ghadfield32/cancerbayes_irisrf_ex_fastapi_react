@@ -1,64 +1,65 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python
 """
-Ensure models script - pre-trains all models before starting the API.
-This can be used in development or CI to ensure models are ready.
+Optional warm‑start script for Railway.
+
+(Logging additions for deploy debugging.)
 """
+
+from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import sys
 from pathlib import Path
 
-# Add the api directory to the Python path
-sys.path.insert(0, str(Path(__file__).parent.parent))
+log = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO)
 
-from app.services.ml.model_service import TRAINERS, ModelService
+HERE = Path(__file__).resolve()
+API_DIR = HERE.parents[1]
+ROOT = HERE.parents[2]
+log.info("ensure_models: __file__=%s", HERE)
+log.info("ensure_models: api_dir=%s", API_DIR)
+log.info("ensure_models: root=%s", ROOT)
+log.info("ensure_models: cwd=%s", Path.cwd())
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
+# Ensure we can import `app.*` when executed as a script from repo root
+if str(API_DIR) not in sys.path:
+    sys.path.insert(0, str(API_DIR))
 
-async def main():
-    """Ensure all models are trained and loaded."""
-    logger.info("🚀 Starting model ensure script...")
+from app.services.ml.model_service import model_service  # type: ignore
 
-    svc = ModelService()
 
-    # Start the self-healing process
-    await svc.startup(auto_train=True)
+async def _main() -> None:
+    # Add lightweight experiment bootstrap
+    try:
+        import mlflow
+        from mlflow.tracking import MlflowClient
 
-    # Wait until all models are loaded
-    max_wait = 300  # 5 minutes max
-    start_time = asyncio.get_event_loop().time()
+        # Ensure the experiment exists before any model loading
+        client = MlflowClient()
+        exp = client.get_experiment_by_name("ml_fullstack_models")
+        if exp is None:
+            exp_id = client.create_experiment("ml_fullstack_models")
+            log.info("ensure_models: created experiment ml_fullstack_models (ID: %s)", exp_id)
+        else:
+            log.info("ensure_models: found existing experiment ml_fullstack_models (ID: %s)", exp.experiment_id)
+    except Exception as e:
+        log.warning("ensure_models: experiment bootstrap failed: %s", e)
 
-    while len(svc.models) < len(TRAINERS):
-        if asyncio.get_event_loop().time() - start_time > max_wait:
-            logger.error("❌ Timeout waiting for models to load")
-            return False
+    log.info("ensure_models: initialize() …")
+    await model_service.initialize()
+    log.info("ensure_models: startup(auto_train=False) …")
+    await model_service.startup(auto_train=False)
+    log.info("ensure_models: status=%s", model_service.status)
 
-        logger.info(f"⏳ Waiting for models... ({len(svc.models)}/{len(TRAINERS)} loaded)")
-
-        # Check for failed models
-        failed = [name for name, status in svc.status.items() if status == "failed"]
-        if failed:
-            logger.error(f"❌ Models failed to train: {failed}")
-            return False
-
-        await asyncio.sleep(5)
-
-    logger.info("✅ All models loaded successfully!")
-    return True
 
 if __name__ == "__main__":
     try:
-        success = asyncio.run(main())
-        sys.exit(0 if success else 1)
-    except KeyboardInterrupt:
-        logger.info("⏹️  Interrupted by user")
-        sys.exit(1)
-    except Exception as e:
-        logger.error(f"❌ Unexpected error: {e}")
-        sys.exit(1) 
+        asyncio.run(_main())
+    except Exception as exc:
+        log.exception("ensure_models failed: %s", exc)
+        # Non-zero exit? Returning 0 keeps container booting;
+        # change to `raise` if you want hard fail.
+        sys.exit(0)

@@ -1,6 +1,5 @@
 import React from 'react';
 import { Zap, Clock, CheckCircle } from 'lucide-react';
-import { apiService } from '../services/api';
 import toast from 'react-hot-toast';
 
 const ModelTraining = ({ dataset, onTrain, isTraining, setIsTraining }) => {
@@ -35,20 +34,18 @@ const ModelTraining = ({ dataset, onTrain, isTraining, setIsTraining }) => {
 
   const pollReady = async (attempt = 0) => {
     try {
-      const res = await apiService.request('ready/full');
-      if (res.models.iris_random_forest && res.models.breast_cancer_bayes) {
-        setIsTraining(false);
-        return;
-      }
+      // For now, we'll just wait a bit and then stop training
+      // The parent component is already polling model status
+      await new Promise(resolve => setTimeout(resolve, 2000));
+      setIsTraining(false);
     } catch { /* ignore */ }
-    setTimeout(() => pollReady(attempt + 1), Math.min(2000 * (attempt + 1), 10000));
   };
 
   const handleTrain = async () => {
     setIsTraining(true);
     try {
-      if (dataset === 'iris') await apiService.trainIris();
-      else if (dataset === 'cancer') await apiService.trainCancer();
+      // delegate to the parent so it can pass the right model_type
+      await onTrain();
       toast.success('Training job submitted – refresh will turn green when done');
       pollReady();
     } catch (e) {
@@ -200,4 +197,5 @@ const ModelTraining = ({ dataset, onTrain, isTraining, setIsTraining }) => {
 };
 
 export default ModelTraining; 
+
 

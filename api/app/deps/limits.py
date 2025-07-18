@@ -1,69 +1,60 @@
+# api/app/deps/limits.py  ✅ FIXED
 """
-Rate limiting dependencies for FastAPI endpoints.
-✅ FIX: identifier must be async (fastapi-limiter expects await).
+Rate‑limiting helpers – now **fail‑safe** when Redis is absent and
+compatible with fastapi‑limiter ≥ 0.1.5 which passes *request* and *response*.
 """
-
 from __future__ import annotations
 
 from fastapi_limiter.depends import RateLimiter
+from fastapi_limiter import FastAPILimiter
 from starlette.requests import Request
+from starlette.responses import Response  # NEW
 from ..core.config import settings
 
-# ───────────────────────── helpers ──────────────────────────
+# ── helpers ──────────────────────────────────────────────────────────────
 async def _path_aware_ip(request: Request) -> str:
-    """
-    Return `<ip>:<path>` so each endpoint has its own bucket.
-    Cheap & fully-sync, but declared *async* because fastapi-limiter
-    always awaits the identifier.
-    """
-    forwarded = request.headers.get("X-Forwarded-For")
-    ip = (forwarded.split(",")[0].strip() if forwarded else request.client.host)
+    fwd = request.headers.get("X-Forwarded-For")
+    ip = (fwd.split(",")[0].strip() if fwd else request.client.host)
     return f"{ip}:{request.scope['path']}"
 
-async def user_or_ip(request: Request) -> str:
-    """
-    Prefer JWT → keeps per-user buckets across NAT; otherwise fall back to IP+path.
-    Also declared async for compatibility with fastapi-limiter.
-    """
+async def _user_or_ip(request: Request) -> str:
     auth = request.headers.get("Authorization", "")
     if auth.startswith("Bearer "):
         return auth[7:]
     return await _path_aware_ip(request)
 
-# ──────────────────────── limiters ──────────────────────────
+async def _no_limit(_: Request, __: Response) -> None:  # SIG UPDATED
+    """Dummy dependency when rate‑limiting is disabled."""
+    return None
 
-default_limit = RateLimiter(
-    times=settings.RATE_LIMIT_DEFAULT,
-    seconds=settings.RATE_LIMIT_WINDOW,
-    identifier=user_or_ip,
-)
+# ── factory that returns a dependency compatible with new signature ─────
+def _safe_limiter(times: int, seconds: int, identifier):
+    base = RateLimiter(times=times, seconds=seconds, identifier=identifier)
 
-light_limit = RateLimiter(                # /iris/predict
-    times=120,
-    seconds=settings.RATE_LIMIT_WINDOW_LIGHT,  # Use dedicated light window
-    identifier=user_or_ip,                # ← switched to token-based
-)
+    async def wrapper(request: Request, response: Response):  # SIG UPDATED
+        # If Redis is unavailable (e.g. tests), skip gracefully
+        if FastAPILimiter.redis is None:
+            return None
+        return await base(request, response)
 
-heavy_limit = RateLimiter(                # /cancer/predict
-    times=settings.RATE_LIMIT_CANCER,
-    seconds=settings.RATE_LIMIT_WINDOW,
-    identifier=user_or_ip,
-)
+    return wrapper
 
-login_limit = RateLimiter(                # bad‑login attempts
-    # `times` is exclusive – allow three failures, block 4th
-    times=settings.RATE_LIMIT_LOGIN + 1,
-    seconds=settings.RATE_LIMIT_LOGIN_WINDOW,
-    identifier=_path_aware_ip,
-)
+# ── public dependencies ---------------------------------------------------
+if settings.ENABLE_RATE_LIMIT:
+    default_limit  = _safe_limiter(settings.RATE_LIMIT_DEFAULT,
+                                   settings.RATE_LIMIT_WINDOW, _user_or_ip)
+    light_limit    = _safe_limiter(settings.RATE_LIMIT_DEFAULT * 2,
+                                   settings.RATE_LIMIT_WINDOW_LIGHT, _user_or_ip)
+    heavy_limit    = _safe_limiter(settings.RATE_LIMIT_CANCER,
+                                   settings.RATE_LIMIT_WINDOW, _user_or_ip)
+    login_limit    = _safe_limiter(settings.RATE_LIMIT_LOGIN + 1,
+                                   settings.RATE_LIMIT_LOGIN_WINDOW, _path_aware_ip)
+    training_limit = _safe_limiter(settings.RATE_LIMIT_TRAINING,
+                                   settings.RATE_LIMIT_WINDOW * 5, _user_or_ip)
+else:
+    # All no‑ops when rate‑limiting disabled
+    default_limit = light_limit = heavy_limit = login_limit = training_limit = _no_limit
 
-training_limit = RateLimiter(             # /train endpoints
-    times=settings.RATE_LIMIT_TRAINING,
-    seconds=settings.RATE_LIMIT_WINDOW * 5,
-    identifier=user_or_ip,
-)
-
-# Handy handle for debug & CI
 def get_redis():
-    from fastapi_limiter import FastAPILimiter as _L
-    return _L.redis 
+    """Helper for tests/metrics."""
+    return FastAPILimiter.redis

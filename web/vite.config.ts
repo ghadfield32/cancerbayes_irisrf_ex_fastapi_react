@@ -1,61 +1,52 @@
 import { defineConfig, loadEnv } from 'vite'
 import react from '@vitejs/plugin-react'
+import path from 'path'
 
-// https://vite.dev/config/
+// Centralizes build-time API URL logic; runtime JSON removed.
 export default defineConfig(({ mode }) => {
-  const env = loadEnv(mode, process.cwd(), '')
-  const raw = env.VITE_API_URL || 
-              (mode === 'production'
-                ? 'https://fastapi-production-1d13.up.railway.app'
-                : 'http://127.0.0.1:8000')
+  const envDir = __dirname
+  const env = loadEnv(mode, envDir, '') // loads web/.env
 
-  // ── NEW: always tack on /api/v1 exactly once ─────────────────────
-  const withPrefix = raw.replace(/\/+$/, '')      // trim trailing /
-  const API_URL = withPrefix.endsWith('/api/v1')
-    ? withPrefix
-    : `${withPrefix}/api/v1`
+  // Source of truth is now web/.env generated from config.yaml.
+  const raw = env.VITE_API_URL || ''
 
-  // Final sanity-check – bail if still invalid
-  if (!/^https?:\/\/[^/]+/.test(API_URL)) {
-    throw new Error(`VITE_API_URL must be an absolute URL – got "${API_URL}"`);
+  // Normalize: ensure single /api/v1 suffix
+  const trimmed = raw.replace(/\/+$/, '')
+  const API_URL = /\/api\/v1$/.test(trimmed) ? trimmed : `${trimmed}/api/v1`
+
+  if (!API_URL) {
+    if (mode === 'development') {
+      // Dev-friendly fallback – loud warning (should rarely trigger)
+      console.warn('[vite.config] VITE_API_URL missing – using http://127.0.0.1:8000/api/v1')
+    } else {
+      throw new Error('[vite.config] VITE_API_URL is required for non-dev builds')
+    }
   }
 
-  console.log('🔍 Vite Config Debug:')
-  console.log('Mode:', mode)
-  console.log('Raw API_URL:', raw)
-  console.log('Normalized API_URL:', API_URL)
-  console.log('All VITE_ env vars:', Object.keys(env).filter(key => key.startsWith('VITE_')))
+  console.log('🔍 Vite Config:')
+  console.log('  Mode              :', mode)
+  console.log('  Loaded from       :', path.join(envDir, '.env'))
+  console.log('  VITE_API_URL (raw):', raw)
+  console.log('  API_URL (final)   :', API_URL)
 
   return {
+    envDir,                // ← this is what tells Vite where to look
     plugins: [react()],
-    /** Inject __API_URL__ constant */
     define: {
-      __API_URL__: JSON.stringify(API_URL),
-      'import.meta.env.VITE_API_URL': JSON.stringify(API_URL)
+      __BUILD_API_URL__: JSON.stringify(API_URL),      // one canonical build-time constant
     },
-    server: {
-      host: '0.0.0.0',
-      port: 5173,
-      proxy: {
-        '/api/v1': {
-          target: 'http://127.0.0.1:8000',
-          changeOrigin: true,
-          secure: false,
-          rewrite: (path) => path, // Keep the /api/v1 prefix
-          configure: (proxy, _options) => {
-            proxy.on('error', (err, _req, _res) => {
-              console.log('🔍 Proxy Error:', err)
-            })
-            proxy.on('proxyReq', (proxyReq, req, _res) => {
-              console.log('🔍 Proxy Request:', req.method, req.url, '-> ', proxyReq.path)
-            })
-            proxy.on('proxyRes', (proxyRes, req, _res) => {
-              console.log('🔍 Proxy Response:', proxyRes.statusCode, req.url)
-            })
+          server: {
+        host: '0.0.0.0',
+        port: 5173,
+        proxy: {
+          '/api/v1': {
+            target: 'http://127.0.0.1:8000',
+            changeOrigin: true,
+            secure: false,
+            rewrite: p => p
           }
         }
-      }
-    },
+      },
     build: {
       outDir: 'dist',
       assetsDir: 'assets',
@@ -78,5 +69,9 @@ export default defineConfig(({ mode }) => {
     }
   }
 })
+
+
+
+
 
 

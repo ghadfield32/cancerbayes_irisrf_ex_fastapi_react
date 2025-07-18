@@ -5,7 +5,7 @@ Shows rate limit keys, their values, and TTL in real-time.
 """
 
 import asyncio
-import redis.asyncio as redis
+from redis import asyncio as redis
 import time
 import json
 from typing import Dict, List

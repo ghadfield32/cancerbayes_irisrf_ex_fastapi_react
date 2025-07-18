@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { Play, RotateCcw } from 'lucide-react';
 
-const IrisForm = ({ onPredict, isLoading }) => {
+const IrisForm = ({ onPredict, isLoading, onModelTypeChange }) => {
   const [formData, setFormData] = useState({
     model_type: 'rf',
     samples: [{
@@ -27,6 +27,9 @@ const IrisForm = ({ onPredict, isLoading }) => {
       ...prev,
       model_type: value
     }));
+    if (onModelTypeChange) {
+      onModelTypeChange(value);
+    }
   };
 
   const handleSubmit = (e) => {

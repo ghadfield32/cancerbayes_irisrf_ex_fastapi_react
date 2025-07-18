@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
 import { Toaster } from 'react-hot-toast';
 import MLModelFrontend from './components/MLModelFrontend';
@@ -13,95 +13,88 @@ function App() {
   const [user, setUser] = useState(null);
   const [backendReady, setBackendReady] = useState(false);
 
-  useEffect(() => {
-    console.debug('[App] useEffect starting - checking auth and readiness');
-    (async () => {
-      try {
-        console.debug('[App] Calling checkAuthStatus');
-        await checkAuthStatus();
-        console.debug('[App] checkAuthStatus completed successfully');
-      } catch (error) {
-        console.error('[App] checkAuthStatus failed:', error);
-      }
+  // unified poller ref so we can cancel / avoid duplicates
+  const pollerRef = useRef(null);
+  const destroyedRef = useRef(false);
 
-      console.debug('[App] Starting waitUntilReady');
-      waitUntilReady();
+  // --- DEBUG DIAGNOSTICS (safe to remove later) -----------------
+  if (import.meta.env.DEV) {
+    // This will run every render – fine for dev introspection
+    // eslint-disable-next-line no-console
+    console.debug('[App:render]', {
+      path: window.location.pathname,
+      isAuthenticated,
+      isLoading,
+      backendReady
+    });
+  }
+
+  useEffect(() => {
+    destroyedRef.current = false;
+    (async () => {
+      await checkAuthStatus();
+      startUnifiedReadinessPoll();
     })();
+
+    return () => {
+      destroyedRef.current = true;
+      if (pollerRef.current) {
+        clearTimeout(pollerRef.current);
+        pollerRef.current = null;
+      }
+    };
+    // empty dep array – intentional; StrictMode double-mount safe because cleanup runs
   }, []);
 
-  const waitUntilReady = async (attempt = 0) => {
-    const jitter = Math.random() * 250;  // ±250 ms jitter
+  const startUnifiedReadinessPoll = async (attempt = 0) => {
+    if (destroyedRef.current) return;
     try {
-      console.debug(`[ready] Polling backend readiness (attempt ${attempt + 1})`);
-      const res = await apiService.getReady();
-      console.debug('[ready] Backend response:', res);
-      console.debug('[ready] res?.ready value:', res?.ready);
-      console.debug('[ready] backendReady before set:', backendReady);
-
-      setBackendReady(Boolean(res?.ready));
-      console.debug('[ready] backendReady after set:', Boolean(res?.ready));
-
-      if (!res?.ready) {
-        const delay = Math.min(1000 * 2 ** attempt, 8000) + jitter;
-        console.debug(`[ready] Backend not ready, retrying in ${delay}ms (attempt ${attempt + 1})`);
-        setTimeout(() => waitUntilReady(attempt + 1), delay);
-      } else {
-        console.debug('[ready] Backend is ready!');
+      const res = await apiService.getReadyFull(); // use full – includes model_status
+      // eslint-disable-next-line no-console
+      console.debug('[readiness] attempt', attempt, res);
+      if (res?.ready) {
+        setBackendReady(true);
+        return; // stop polling
       }
     } catch (err) {
-      console.error('[ready] Poll failed:', err);
-      const delay = Math.min(1000 * 2 ** attempt, 8000) + jitter;
-      console.debug(`[ready] Poll failed, retrying in ${delay}ms (attempt ${attempt + 1})`);
-      setTimeout(() => waitUntilReady(attempt + 1), delay);
+      console.error('[readiness] poll error', err);
     }
+    const delay = Math.min(1500 * 2 ** attempt, 8000);
+    pollerRef.current = setTimeout(() => startUnifiedReadinessPoll(attempt + 1), delay);
   };
 
   const checkAuthStatus = async () => {
-    console.debug('[auth] checkAuthStatus starting');
     const token = localStorage.getItem('jwt');
-    console.debug('[auth] Token found:', !!token);
-
     if (!token) {
-      console.debug('[auth] No token found');
       setIsLoading(false);
       return;
     }
-
     try {
-      console.debug('[auth] Validating existing token');
-      // Verify token is still valid by calling a protected endpoint
-      const healthResponse = await apiService.getHealth();
-      console.debug('[auth] Health check response:', healthResponse);
+      await apiService.getHealth(); // lightweight probe
       setUser({ username: 'authenticated' });
       setIsAuthenticated(true);
-      console.debug('[auth] Token is valid');
-    } catch (error) {
-      console.error('[auth] Token validation failed:', error);
+    } catch (err) {
+      console.warn('[auth] stored token invalid – clearing', err);
       localStorage.removeItem('jwt');
       setIsAuthenticated(false);
     } finally {
       setIsLoading(false);
-      console.debug('[auth] checkAuthStatus completed');
     }
   };
 
   const handleLogin = async (credentials) => {
     try {
-      console.debug('[auth] Attempting login for:', credentials.username);
       const response = await apiService.login(credentials);
       localStorage.setItem('jwt', response.access_token);
       setUser({ username: credentials.username });
       setIsAuthenticated(true);
-      console.debug('[auth] Login successful');
       return { success: true };
     } catch (error) {
-      console.error('[auth] Login failed:', error);
       return { success: false, error: error.message };
     }
   };
 
   const handleLogout = () => {
-    console.debug('[auth] Logging out');
     localStorage.removeItem('jwt');
     setUser(null);
     setIsAuthenticated(false);
@@ -110,7 +103,8 @@ function App() {
   if (isLoading) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-gray-50">
-        <div className="spinner"></div>
+        {/* fallback size so spinner always visible */}
+        <div className="spinner" style={{ width: 40, height: 40 }} />
       </div>
     );
   }
@@ -118,53 +112,45 @@ function App() {
   return (
     <Router>
       <div className="App">
-        <Toaster 
+        <Toaster
           position="top-right"
           toastOptions={{
             duration: 4000,
-            style: {
-              background: '#363636',
-              color: '#fff',
-            },
+            style: { background: '#363636', color: '#fff' }
           }}
         />
-
         <Routes>
-          <Route 
-            path="/login" 
+          <Route
+            path="/login"
             element={
-              isAuthenticated ? (
-                <Navigate to="/" replace />
-              ) : (
-                <Login onLogin={handleLogin} backendReady={backendReady} />
-              )
-            } 
+              isAuthenticated
+                ? <Navigate to="/" replace />
+                : <Login onLogin={handleLogin} backendReady={backendReady} />
+            }
           />
-
-          <Route 
-            path="/" 
+          <Route
+            path="/"
             element={
-              isAuthenticated ? (
-                <Layout user={user} onLogout={handleLogout}>
-                  <MLModelFrontend />
-                </Layout>
-              ) : (
-                <Navigate to="/login" replace />
-              )
-            } 
+              isAuthenticated
+                ? (
+                  <Layout user={user} onLogout={handleLogout}>
+                    <MLModelFrontend backendReady={backendReady} />
+                  </Layout>
+                )
+                : <Navigate to="/login" replace />
+            }
           />
-
-          <Route 
-            path="/dashboard" 
+          <Route
+            path="/dashboard"
             element={
-              isAuthenticated ? (
-                <Layout user={user} onLogout={handleLogout}>
-                  <MLModelFrontend />
-                </Layout>
-              ) : (
-                <Navigate to="/login" replace />
-              )
-            } 
+              isAuthenticated
+                ? (
+                  <Layout user={user} onLogout={handleLogout}>
+                    <MLModelFrontend backendReady={backendReady} />
+                  </Layout>
+                )
+                : <Navigate to="/login" replace />
+            }
           />
         </Routes>
       </div>
@@ -173,6 +159,7 @@ function App() {
 }
 
 export default App; 
+
 
 
 

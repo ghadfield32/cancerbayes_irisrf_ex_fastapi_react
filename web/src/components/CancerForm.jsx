@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { Play, RotateCcw, ChevronDown, ChevronUp } from 'lucide-react';
 
-const CancerForm = ({ onPredict, isLoading }) => {
+const CancerForm = ({ onPredict, isLoading, onModelTypeChange }) => {
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [formData, setFormData] = useState({
     model_type: 'bayes',
@@ -59,6 +59,9 @@ const CancerForm = ({ onPredict, isLoading }) => {
       ...prev,
       model_type: value
     }));
+    if (onModelTypeChange) {
+      onModelTypeChange(value);
+    }
   };
 
   const handleSubmit = (e) => {
@@ -107,10 +110,10 @@ const CancerForm = ({ onPredict, isLoading }) => {
   const sample = formData.samples[0];
 
   const meanFeatures = [
-    { key: 'mean_radius', label: 'Mean Radius', step: 0.1, max: 30 },
-    { key: 'mean_texture', label: 'Mean Texture', step: 0.1, max: 50 },
-    { key: 'mean_perimeter', label: 'Mean Perimeter', step: 0.1, max: 200 },
-    { key: 'mean_area', label: 'Mean Area', step: 1, max: 2500 },
+    { key: 'mean_radius', label: 'Mean Radius', step: 0.001, max: 30 },
+    { key: 'mean_texture', label: 'Mean Texture', step: 0.001, max: 50 },
+    { key: 'mean_perimeter', label: 'Mean Perimeter', step: 0.001, max: 200 },
+    { key: 'mean_area', label: 'Mean Area', step: 0.001, max: 2500 },
     { key: 'mean_smoothness', label: 'Mean Smoothness', step: 0.001, max: 0.2 },
     { key: 'mean_compactness', label: 'Mean Compactness', step: 0.001, max: 0.5 },
     { key: 'mean_concavity', label: 'Mean Concavity', step: 0.001, max: 0.5 },
@@ -178,7 +181,7 @@ const CancerForm = ({ onPredict, isLoading }) => {
           className="form-input"
         >
           <option value="bayes">Bayesian Model</option>
-          <option value="stub">Stub (Fast fallback)</option>
+          <option value="stub">Logreg (Fast fallback)</option>
         </select>
       </div>
 
