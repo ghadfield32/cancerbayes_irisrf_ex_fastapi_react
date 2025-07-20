@@ -1,109 +1,117 @@
 #!/usr/bin/env node
 /**
- * Generate web/.env from root config.yaml + selected environment.
+ * Revised generator:
+ *  - Introduces separation of LOCAL/STAGING/RAILWAY base keys (not auto-exposed).
+ *  - Derives exactly one VITE_API_URL based on APP_ENV.
+ *  - Still copies config.yaml into web/ for transparency.
+ *  - Ensures old config.yaml is deleted before copying fresh one.
+ *  - Adds APP_ENV to the .env file for frontend awareness.
  *
- * Usage:
- *   APP_ENV=staging node scripts/config-to-env.mjs
- *   node scripts/config-to-env.mjs prod
+ * Selection rules:
+ *   prod|production -> RAILWAY_VITE_API_BASE
+ *   staging         -> STAGING_VITE_API_BASE || LOCAL_VITE_API_BASE
+ *   default (dev)   -> LOCAL_VITE_API_BASE
  *
- * Precedence:
- *   1. CLI arg (first non-flag) or APP_ENV env var (else 'dev')
- *   2. Merge: default + <env>
- *   3. For each key starting with VITE_ output to web/.env
+ * Only the final derived VITE_API_URL is written to web/.env (plus any other VITE_* keys that already exist).
  *
- * Guarantees VITE_API_URL ends with /api/v1 (without trailing slash duplication).
- *
- * Rationale:
- *   - Centralizes config (12-Factor: config not baked into code). 
- *   - Lets Vite statically inject values at build time (import.meta.env). 
+ * Safe: Non-VITE_* keys stay private (not shipped to client bundle).
  */
+
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import * as yaml from 'yaml'; // using 'yaml' pkg
+import * as yaml from 'yaml';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname  = path.dirname(__filename);
 const root       = path.resolve(__dirname, '..');
 const webDir     = path.join(root, 'web');
 
-function log(...args) {
-  console.log('[config-to-env]', ...args);
-}
-
-function fail(msg) {
-  console.error('❌ [config-to-env]', msg);
-  process.exit(1);
-}
+function log(...args)  { console.log('[config-to-env]', ...args); }
+function fail(msg)     { console.error('❌ [config-to-env]', msg); process.exit(1); }
 
 const cliEnvArg = process.argv.slice(2).find(a => !a.startsWith('-'));
-const targetEnv = process.env.APP_ENV || cliEnvArg || 'dev';
+const targetEnv = (process.env.APP_ENV || cliEnvArg || 'dev').toLowerCase();
 
 const cfgPath = path.join(root, 'config.yaml');
 if (!fs.existsSync(cfgPath)) fail(`config.yaml not found at ${cfgPath}`);
 
-const rawYaml = fs.readFileSync(cfgPath, 'utf8');
 let doc;
 try {
-  doc = yaml.parse(rawYaml);
+  doc = yaml.parse(fs.readFileSync(cfgPath, 'utf8'));
 } catch (e) {
   fail(`YAML parse error: ${e.message}`);
 }
 
 if (!doc.default) fail('Missing "default" section in config.yaml');
-if (!doc[targetEnv]) log(`⚠️  No explicit section "${targetEnv}" – using default only`);
 
 const merged = { ...doc.default, ...(doc[targetEnv] || {}) };
 
-// Extract VITE_* keys
-const viteEntries = Object.entries(merged)
-  .filter(([k]) => k.startsWith('VITE_'));
+// ---- Derive effective base -------------------------------------------------
+const localBase    = merged.LOCAL_VITE_API_BASE;
+const stagingBase  = merged.STAGING_VITE_API_BASE || localBase;
+const railwayBase  = merged.RAILWAY_VITE_API_BASE;
 
-// Normalize API URL if present
-function normalizeApi(url) {
-  if (!url) return url;
-  let base = url.trim();
-  if (!/^https?:\/\//.test(base) && !base.startsWith('http://localhost') && !base.startsWith('http://127.0.0.1'))
-    log(`⚠️  VITE_API_URL does not look absolute: "${base}"`);
-  base = base.replace(/\/+$/, '');
-  if (!/\/api\/v1$/.test(base)) base = base + '/api/v1';
+let effectiveBase;
+if (['prod','production'].includes(targetEnv)) {
+  effectiveBase = railwayBase;
+} else if (targetEnv === 'staging') {
+  effectiveBase = stagingBase;
+} else {
+  effectiveBase = localBase;
+}
+
+if (!effectiveBase) {
+  fail(`No effective API base resolved (check LOCAL_VITE_API_BASE / RAILWAY_VITE_API_BASE keys).`);
+}
+
+// Normalize and append /api/v1 if needed
+function normalizeApiBase(b) {
+  let base = b.trim().replace(/\/+$/, '');
+  if (!/\/api\/v1$/.test(base)) base += '/api/v1';
   return base;
 }
+const finalApiUrl = normalizeApiBase(effectiveBase);
 
-let apiBefore = null;
-let apiAfter  = null;
+// Collect any *existing* merged VITE_ keys (other than API URL we now control)
+const viteEntries = Object.entries(merged)
+  .filter(([k]) => k.startsWith('VITE_') && k !== 'VITE_API_URL')
+  .map(([k, v]) => [k, v]);
 
-const lines = viteEntries.map(([k, v]) => {
-  if (k === 'VITE_API_URL') {
-    apiBefore = v;
-    const norm = normalizeApi(v);
-    apiAfter = norm;
-    return `${k}=${norm}`;
+// Inject our derived VITE_API_URL at the top for visibility
+viteEntries.unshift(['VITE_API_URL', finalApiUrl]);
+
+// Compose .env content
+const lines = viteEntries.map(([k, v]) => `${k}=${v}`);
+
+// Add APP_ENV to the .env file for frontend awareness
+lines.push(`APP_ENV=${targetEnv}`);
+
+const envOut = lines.join('\n') + '\n';
+
+if (!fs.existsSync(webDir)) fail(`web directory not found at ${webDir}`);
+
+// Delete old config.yaml from web/ if it exists
+const webConfigPath = path.join(webDir, 'config.yaml');
+if (fs.existsSync(webConfigPath)) {
+  try {
+    fs.unlinkSync(webConfigPath);
+    log('Deleted old web/config.yaml');
+  } catch (e) {
+    log('Warning: Could not delete old web/config.yaml:', e.message);
   }
-  return `${k}=${v}`;
-});
-
-// Ensure VITE_API_URL exists (fail-fast for staging/prod)
-if (!merged.VITE_API_URL && ['staging','prod','production'].includes(targetEnv)) {
-  fail(`VITE_API_URL missing for environment "${targetEnv}"`);
 }
 
-// Write .env
-const outEnvPath = path.join(webDir, '.env');
-const envContent = lines.join('\n') + '\n';
-log(`Writing to: ${outEnvPath}`);
-log(`Content: ${envContent}`);
-fs.writeFileSync(outEnvPath, envContent, 'utf8');
+const envPath = path.join(webDir, '.env');
+fs.writeFileSync(envPath, envOut, 'utf8');
 
-// Copy config.yaml into web (for inspection – not strictly required)
-const webCfgPath = path.join(webDir, 'config.yaml');
-fs.copyFileSync(cfgPath, webCfgPath);
+// Copy fresh config.yaml for inspection
+fs.copyFileSync(cfgPath, webConfigPath);
 
-log(`Environment: ${targetEnv}`);
-if (apiBefore) {
-  log(`VITE_API_URL (raw)  : ${apiBefore}`);
-  log(`VITE_API_URL (final): ${apiAfter}`);
-} else {
-  log('⚠️  No VITE_API_URL key found in merged config (frontend may rely on fallback)');
-}
-log(`Wrote ${outEnvPath} with ${viteEntries.length} VITE_ keys.`); 
+log(`Environment         : ${targetEnv}`);
+log(`Resolved API base   : ${effectiveBase}`);
+log(`VITE_API_URL (final): ${finalApiUrl}`);
+log(`VITE keys written   : ${viteEntries.length}`);
+log(`APP_ENV set to      : ${targetEnv}`);
+log(`Config copied to    : ${webConfigPath}`); 
+

@@ -13,6 +13,15 @@
     "install:all:unix": "npm run env:full:unix",
     "seed": "cross-env uv run --python .venv/Scripts/python.exe api/scripts/seed_user.py",
     "seed:unix": "cross-env uv run --python .venv/bin/python api/scripts/seed_user.py",
+
+    "frontend:env:dev": "cross-env APP_ENV=dev node scripts/config-to-env.mjs dev",
+    "frontend:env:staging": "cross-env APP_ENV=staging node scripts/config-to-env.mjs staging",
+    "frontend:env:prod": "cross-env APP_ENV=prod node scripts/config-to-env.mjs prod",
+
+    "dev:dev": "npm run frontend:env:dev && concurrently -n \"API,WEB\" -c \"cyan,magenta\" \"npm run backend:reload\" \"npm --prefix web run dev\"",
+    "dev:staging": "npm run frontend:env:staging && concurrently -n \"API,WEB\" -c \"cyan,magenta\" \"npm run backend:staging\" \"npm --prefix web run dev\"",
+    "dev:prod": "npm run frontend:env:prod && concurrently -n \"API,WEB\" -c \"cyan,magenta\" \"npm run backend:prod\" \"npm --prefix web run dev\"",
+
     "dev": "node scripts/config-to-env.mjs && concurrently -n \"API,WEB\" -c \"cyan,magenta\" \"npm run backend:reload\" \"npm --prefix web run dev\"",
     "dev:unix": "node scripts/config-to-env.mjs && concurrently -n \"API,WEB\" -c \"cyan,magenta\" \"npm run backend:reload:unix\" \"npm --prefix web run dev\"",
     "env:switch": "node api/scripts/env-switch.mjs",
@@ -49,7 +58,8 @@
     "ml:promote:prod": "python api/scripts/promote.py prod",
     "config:sync": "node api/scripts/config-sync.mjs",
     "backend:staging:logreg": "npm run config:sync && npm run ml:promote:staging iris_logreg && npm run env:switch env.staging && cross-env APP_ENV=staging npm run backend",
-    "backend:prod:logreg": "npm run config:sync && npm run ml:promote:prod iris_logreg && npm run env:switch env.prod && cross-env APP_ENV=prod npm run backend"
+    "backend:prod:logreg": "npm run config:sync && npm run ml:promote:prod iris_logreg && npm run env:switch env.prod && cross-env APP_ENV=prod npm run backend",
+    "railway:auth": "powershell -ExecutionPolicy Bypass -File scripts/railway_login.ps1"
   },
   "devDependencies": {
     "concurrently": "^8.2.2",
@@ -59,3 +69,4 @@
     "yaml": "^2.8.0"
   }
 }
+

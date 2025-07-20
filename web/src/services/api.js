@@ -1,7 +1,13 @@
 // web/src/services/api.js
 import toast from 'react-hot-toast';     // add toast here for 401 handler
 
-// Resolve API base from build-time (import.meta.env + defined constant)
+/**
+ * API base resolution:
+ *  - Single authoritative VITE_API_URL comes from generated web/.env
+ *    (derived from LOCAL/STAGING/RAILWAY base keys in root config.yaml).
+ *  - We still keep a build-time constant (__BUILD_API_URL__) as a fallback.
+ *  - Only VITE_* keys are exposed to client code (per Vite rules).
+ */
 const API_BASE_URL = (() => {
   const envURL   = import.meta.env?.VITE_API_URL || ''
   const buildURL = (typeof __BUILD_API_URL__ !== 'undefined' && __BUILD_API_URL__) || ''

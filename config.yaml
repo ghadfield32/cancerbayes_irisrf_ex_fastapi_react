@@ -47,10 +47,19 @@ default:
   CACHE_ENABLED: 0           # 0 = disabled, 1 = enabled
   CACHE_TTL_MINUTES: 60      # how long to cache predictions (in minutes)
 
+  # Canonical API base URLs (NOT auto-exposed to frontend – no VITE_ prefix)
+  # Local developer FastAPI port
+  LOCAL_VITE_API_BASE: "http://127.0.0.1:8000"
+  # Staging base (can override below; fallback -> local if not set)
+  STAGING_VITE_API_BASE: "http://127.0.0.1:8000"
+  # Railway production public FastAPI base
+  RAILWAY_VITE_API_BASE: "https://fastapi-production-1d13.up.railway.app"
+
 dev:
   # Database
   DATABASE_URL: "sqlite+aiosqlite:///./app.db"
   SECRET_KEY: "dev-secret-key-change-in-production"
+  VITE_API_URL: "http://127.0.0.1:8000"
 
   # CORS
   ALLOWED_ORIGINS: "http://localhost:3000,http://127.0.0.1:3000"
@@ -95,13 +104,11 @@ dev:
   CACHE_ENABLED: 1
   CACHE_TTL_MINUTES: 5
 
-  VITE_API_URL: "http://localhost:8000/api/v1"
-
 staging:
   # Database
   DATABASE_URL: "sqlite+aiosqlite:///./app.db"
   SECRET_KEY: "staging-secret-key-change-in-production"
-
+  VITE_API_URL: "http://127.0.0.1:8000"
   # CORS
   ALLOWED_ORIGINS: "https://staging-frontend.railway.app"
 
@@ -142,13 +149,16 @@ staging:
   CACHE_ENABLED: 0
   CACHE_TTL_MINUTES: 60
 
-  VITE_API_URL: "http://localhost:8000/api/v1"
+  # Optionally override STAGING_VITE_API_BASE here if you later have a staging FastAPI URL
+  # STAGING_VITE_API_BASE: "https://your-staging-fastapi.up.railway.app"
 
 prod:
   # Database
   DATABASE_URL: "sqlite+aiosqlite:///./app.db"
   SECRET_KEY: "must-come-from-env"
 
+  # adjust this for prod
+  VITE_API_URL: "https://fastapi-production-1d13.up.railway.app"
   # CORS
   ALLOWED_ORIGINS: "https://react-frontend-production-2805.up.railway.app"
 
@@ -185,8 +195,7 @@ prod:
   QUALITY_GATE_ACCURACY_THRESHOLD: 0.92
   QUALITY_GATE_F1_THRESHOLD: 0.92
 
+
   # Generally off in prod unless toggled via env
   CACHE_ENABLED: 0
-  CACHE_TTL_MINUTES: 60 
-
-  VITE_API_URL: "https://fastapi-production-1d13.up.railway.app/api/v1"
+  CACHE_TTL_MINUTES: 60
