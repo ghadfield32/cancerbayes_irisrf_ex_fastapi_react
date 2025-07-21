@@ -59,6 +59,7 @@ dev:
   # Database
   DATABASE_URL: "sqlite+aiosqlite:///./app.db"
   SECRET_KEY: "dev-secret-key-change-in-production"
+  VITE_API_URL: "http://127.0.0.1:8000"
 
   # CORS
   ALLOWED_ORIGINS: "http://localhost:3000,http://127.0.0.1:3000"
@@ -107,7 +108,7 @@ staging:
   # Database
   DATABASE_URL: "sqlite+aiosqlite:///./app.db"
   SECRET_KEY: "staging-secret-key-change-in-production"
-
+  VITE_API_URL: "http://127.0.0.1:8000"
   # CORS
   ALLOWED_ORIGINS: "https://staging-frontend.railway.app"
 
@@ -156,6 +157,8 @@ prod:
   DATABASE_URL: "sqlite+aiosqlite:///./app.db"
   SECRET_KEY: "must-come-from-env"
 
+  # adjust this for prod
+  VITE_API_URL: "https://fastapi-production-1d13.up.railway.app"
   # CORS
   ALLOWED_ORIGINS: "https://react-frontend-production-2805.up.railway.app"
 
@@ -191,6 +194,7 @@ prod:
   MAX_MODEL_VERSIONS_PER_MODEL: 5
   QUALITY_GATE_ACCURACY_THRESHOLD: 0.92
   QUALITY_GATE_F1_THRESHOLD: 0.92
+
 
   # Generally off in prod unless toggled via env
   CACHE_ENABLED: 0

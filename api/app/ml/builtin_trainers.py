@@ -68,19 +68,9 @@ def _fast_resolve(uri: str) -> bool:
 
 
 
-uri = os.getenv("MLFLOW_TRACKING_URI", settings.MLFLOW_TRACKING_URI)
-# optional: if you really want to guard against DNS delays, you can still probe:
-if not _fast_resolve(uri):
-    raise RuntimeError(f"Cannot resolve MLflow URI: {uri}")
-os.environ["MLFLOW_TRACKING_URI"] = uri
-
-mlflow.set_tracking_uri(uri)
-
-
-os.environ.setdefault("MLFLOW_REGISTRY_URI", uri)
-
-mlflow.set_tracking_uri(uri)
-logger.info("📦 Trainers using MLflow @ %s", uri)
+# MLflow tracking URI is now resolved in ModelService.initialize()
+# Trainers assume MLflow is already configured and experiments exist
+logger.info("📦 Trainers ready - MLflow URI will be resolved at service startup")
 
 MLFLOW_EXPERIMENT = "ml_fullstack_models"
 
@@ -356,59 +346,91 @@ def train_breast_cancer_bayes(
     draws: int = 1000,
     tune: int = 1000,
     target_accept: float = 0.99,
+    params_obj=None,   # optional BayesCancerParams
 ) -> str:
     """
-    Hierarchical Bayesian logistic‑regression with varying intercepts by
-    **mean_texture quintile**.
+    Hierarchical Bayesian logistic regression with varying intercepts.
 
-    * Uses **NumPyro NUTS** backend → **no C compilation** on Windows.  
-    * Logs model to MLflow exactly like before so FastAPI can reload it.
+    Adds:
+      * Validated hyperparams via BayesCancerParams (if provided)
+      * Convergence diagnostics: R-hat, bulk/tail ESS
+      * Optional WAIC / LOO (guarded; can be disabled)
+      * Logged warnings if thresholds exceeded
     """
-
-    import pymc as pm                      # PyMC ≥5.9
+    import pymc as pm
     import pandas as pd, numpy as np
     from sklearn.datasets import load_breast_cancer
     from sklearn.preprocessing import StandardScaler
     import mlflow, tempfile, pickle
     from pathlib import Path
 
-    # 1️⃣  ALWAYS ensure the experiment exists *inside* the function
+    # Schema override if provided
+    if params_obj is not None:
+        draws = params_obj.draws
+        tune = params_obj.tune
+        target_accept = params_obj.target_accept
+        compute_waic = params_obj.compute_waic
+        compute_loo = params_obj.compute_loo
+        max_rhat_warn = params_obj.max_rhat_warn
+        min_ess_warn = params_obj.min_ess_warn
+    else:
+        compute_waic = True
+        compute_loo = False
+        max_rhat_warn = 1.01
+        min_ess_warn = 400
+
+    logger.info(
+        "BayesCancer: draws=%d tune=%d target_accept=%.3f waic=%s loo=%s",
+        draws, tune, target_accept, compute_waic, compute_loo
+    )
+
     _ensure_experiment(MLFLOW_EXPERIMENT)
 
-    # Note: PyTensor config is set by env_sanitizer before import
-    # No runtime config changes needed - they're already applied
-
-    # 1️⃣  data ----------------------------------------------------------------
     X_df, y = load_breast_cancer(as_frame=True, return_X_y=True)
     quint, edges = pd.qcut(X_df["mean texture"], 5, labels=False, retbins=True)
-    g        = np.asarray(quint, dtype="int64")          # 0‥4
-    scaler   = StandardScaler().fit(X_df)
-    Xs       = scaler.transform(X_df)
+    g = np.asarray(quint, dtype="int64")
+    scaler = StandardScaler().fit(X_df)
+    Xs = scaler.transform(X_df)
 
-    # 2️⃣  model ---------------------------------------------------------------
     coords = {"group": np.arange(5)}
     with pm.Model(coords=coords) as m:
-        α     = pm.Normal("α", 0.0, 1.0, dims="group")   # varying intercepts
-        β     = pm.Normal("β", 0.0, 1.0, shape=Xs.shape[1])
+        α = pm.Normal("α", 0.0, 1.0, dims="group")
+        β = pm.Normal("β", 0.0, 1.0, shape=Xs.shape[1])
         logit = α[g] + pm.math.dot(Xs, β)
         pm.Bernoulli("obs", logit_p=logit, observed=y)
-
         idata = pm.sample(
             draws=draws,
             tune=tune,
             chains=4,
-            nuts_sampler="numpyro",        # <-- magic line
+            nuts_sampler="numpyro",
             target_accept=target_accept,
             progressbar=False,
         )
 
-    # 3️⃣  lightweight pyfunc wrapper -----------------------------------------
+    # Diagnostics
+    import arviz as az
+    rhat = az.rhat(idata).to_array().values.max()
+    ess_bulk = az.ess(idata, method="bulk").to_array().values.min()
+    ess_tail = az.ess(idata, method="tail").to_array().values.min()
+    waic_val = None
+    loo_val = None
+    try:
+        if compute_waic:
+            waic_val = float(az.waic(idata).waic)
+    except Exception as e:
+        logger.warning("WAIC computation failed: %s", e)
+    try:
+        if compute_loo:
+            loo_val = float(az.loo(idata).loo)
+    except Exception as e:
+        logger.warning("LOO computation failed: %s", e)
+
+    # Wrapper
     class _HierBayesWrapper(mlflow.pyfunc.PythonModel):
         def __init__(self, trace, sc, ed, cols):
             self.trace, self.scaler, self.edges, self.cols = trace, sc, ed, cols
 
         def _quint(self, df):
-            # Handle both "mean texture" and "mean_texture" column names
             col = "mean texture"
             if col not in df.columns and "mean_texture" in df.columns:
                 df = df.rename(columns={"mean_texture": col})
@@ -416,29 +438,49 @@ def train_breast_cancer_bayes(
             return np.clip(np.digitize(tex, self.edges, right=False), 0, 4)
 
         def predict(self, context, model_input, params=None):
-            df  = model_input if isinstance(model_input, pd.DataFrame) else pd.DataFrame(model_input, columns=self.cols)
-            xs  = self.scaler.transform(df)
-            g   = self._quint(df)
-            αg  = self.trace.posterior["α"].median(("chain", "draw")).values
-            β   = self.trace.posterior["β"].median(("chain", "draw")).values
+            df = model_input if isinstance(model_input, pd.DataFrame) else pd.DataFrame(model_input, columns=self.cols)
+            xs = self.scaler.transform(df)
+            g = self._quint(df)
+            αg = self.trace.posterior["α"].median(("chain", "draw")).values
+            β = self.trace.posterior["β"].median(("chain", "draw")).values
             log = αg[g] + np.dot(xs, β)
             return 1.0 / (1.0 + np.exp(-log))
 
     wrapper = _HierBayesWrapper(idata, scaler, edges[1:-1], X_df.columns.tolist())
-    acc     = float(((wrapper.predict(None, X_df) > .5).astype(int) == y).mean())
+    preds = wrapper.predict(None, X_df)
+    acc = float(((preds > 0.5).astype(int) == y).mean())
 
-    # 4️⃣  MLflow logging (unchanged) -----------------------------------------
+    # Threshold warnings
+    if rhat > max_rhat_warn:
+        logger.warning("R-hat exceeds threshold: %.4f > %.2f", rhat, max_rhat_warn)
+    if ess_bulk < min_ess_warn:
+        logger.warning("Bulk ESS below threshold: %.1f < %d", ess_bulk, min_ess_warn)
+
     with tempfile.TemporaryDirectory() as td, mlflow.start_run(run_name="breast_cancer_bayes") as run:
-        # Log config hash for reproducibility and drift detection
         from app.core.config import settings as _s
         import hashlib, json
         _cfg_hash = hashlib.sha256(json.dumps(_s.model_dump(), sort_keys=True).encode()).hexdigest()
+
+        # Metrics
+        mlflow.log_metric("accuracy", acc)
+        mlflow.log_metric("rhat_max", rhat)
+        mlflow.log_metric("ess_bulk_min", ess_bulk)
+        mlflow.log_metric("ess_tail_min", ess_tail)
+        if waic_val is not None:
+            mlflow.log_metric("waic", waic_val)
+        if loo_val is not None:
+            mlflow.log_metric("loo", loo_val)
+
+        # Params
         mlflow.log_param("train_config_hash", _cfg_hash)
+        mlflow.log_param("draws", draws)
+        mlflow.log_param("tune", tune)
+        mlflow.log_param("target_accept", target_accept)
+        mlflow.log_param("compute_waic", compute_waic)
+        mlflow.log_param("compute_loo", compute_loo)
 
         sc_path = Path(td) / "scaler.pkl"
         pickle.dump(scaler, open(sc_path, "wb"))
-        mlflow.log_params(dict(draws=draws, tune=tune, target_accept=target_accept))
-        mlflow.log_metric("accuracy", acc)
         mlflow.pyfunc.log_model(
             "model",
             python_model=wrapper,

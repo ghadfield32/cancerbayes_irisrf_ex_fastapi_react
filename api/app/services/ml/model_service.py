@@ -32,6 +32,13 @@ from app.ml.builtin_trainers import (
     train_breast_cancer_stub,
 )
 
+# NEW imports for registry integration
+from importlib import import_module
+try:
+    from src.registry import registry as dynamic_registry  # noqa
+except Exception:
+    dynamic_registry = None  # tolerant if path not yet packaged
+
 
 # from ..core.config import settings
 # from ..ml.builtin_trainers import (
@@ -170,12 +177,89 @@ class ModelService:
         self.mlflow_client = None
 
         self.models: Dict[str, Any] = {}
+        # registry bootstrap flags
+        self._registry_loaded = False
         self.status: Dict[str, str] = {
             "iris_random_forest": "missing",
             "iris_logreg":        "missing",  # NEW
             "breast_cancer_bayes": "missing",
             "breast_cancer_stub": "missing",
         }
+
+    # --- Registry integration (increment 1) ---------------------------------
+    def _init_registry_once(self):
+        if self._registry_loaded:
+            return
+        if dynamic_registry is None:
+            logger.info("Registry package not available yet; skipping dynamic trainer loading.")
+            self._registry_loaded = True
+            return
+        try:
+            # Hardcode first migrated trainer; later we will iterate YAML directory.
+            from src.registry.registry import load_from_entry_point  # type: ignore
+            load_from_entry_point("src.trainers.iris_rf_trainer:IrisRandomForestTrainer")
+            self._registry_loaded = True
+            logger.info("Dynamic registry initialized with trainers: %s",
+                        list(dynamic_registry.all_names()))
+        except Exception as e:
+            logger.warning("Failed to initialize registry: %s", e)
+            self._registry_loaded = True  # prevent retry storm
+
+    def _get_trainer_or_none(self, name: str):
+        if not self._registry_loaded:
+            self._init_registry_once()
+        try:
+            from src.registry.registry import get as reg_get  # type: ignore
+            return reg_get(name)
+        except Exception:
+            return None
+
+    async def train_via_registry(self, name: str, overrides: Dict[str, Any] | None = None) -> Optional[str]:
+        spec = self._get_trainer_or_none(name)
+        if spec is None:
+            logger.info("No registry trainer for %s", name)
+            return None
+        trainer = spec.cls()
+        # merge overrides
+        params = trainer.merge_hyperparams(overrides or {})
+        loop = asyncio.get_running_loop()
+        logger.info("Training %s via registry with params=%s", name, params)
+        result = await loop.run_in_executor(self._EXECUTOR, lambda: trainer.train(**params))
+        # After training, force reload of production candidate (latest run fallback)
+        await self._try_load(name)
+        return result.run_id
+
+    def _resolve_tracking_uri(self) -> str:
+        """
+        Resolve MLflow tracking URI with graceful fallback:
+          1. Explicit env var MLFLOW_TRACKING_URI
+          2. settings.MLFLOW_TRACKING_URI
+          3. local file store 'file:./mlruns_local'
+        DNS / connection problems downgrade to local file store.
+        """
+        import socket, urllib.parse, mlflow
+        candidates = []
+        if os.getenv("MLFLOW_TRACKING_URI"):
+            candidates.append(("env", os.getenv("MLFLOW_TRACKING_URI")))
+        candidates.append(("settings", settings.MLFLOW_TRACKING_URI))
+        candidates.append(("fallback", "file:./mlruns_local"))
+
+        for origin, uri in candidates:
+            parsed = urllib.parse.urlparse(uri)
+            if parsed.scheme in ("http", "https"):
+                host = parsed.hostname
+                try:
+                    socket.getaddrinfo(host, parsed.port or 80)
+                    logger.info("MLflow URI ok (%s): %s", origin, uri)
+                    return uri
+                except socket.gaierror as e:
+                    logger.warning("MLflow URI unresolved (%s=%s) -> %s", origin, uri, e)
+            else:
+                # file store always acceptable
+                logger.info("MLflow file store selected (%s): %s", origin, uri)
+                return uri
+
+        return "file:./mlruns_local"
 
     async def initialize(self) -> None:
         """
@@ -200,15 +284,17 @@ class ModelService:
             return not callable(getattr(client, "list_experiments", None))
 
         try:
-            mlflow.set_tracking_uri(settings.MLFLOW_TRACKING_URI)
-            self.mlflow_client = MlflowClient(settings.MLFLOW_TRACKING_URI)
+            resolved = self._resolve_tracking_uri()
+            mlflow.set_tracking_uri(resolved)
+            logger.info("Using tracking URI: %s", resolved)
+            self.mlflow_client = MlflowClient(resolved)
 
             if _needs_fallback(self.mlflow_client):
                 raise AttributeError("list_experiments not implemented – skinny build detected")
 
             # minimal probe (cheap & always present)
             self.mlflow_client.search_experiments(max_results=1)
-            logger.info("🟢  Connected to MLflow @ %s", settings.MLFLOW_TRACKING_URI)
+            logger.info("🟢  Connected to MLflow @ %s", resolved)
 
         except (MlflowException, socket.gaierror, AttributeError) as exc:
             logger.warning("🔄  Falling back to local MLflow store – %s", exc)
@@ -250,41 +336,38 @@ class ModelService:
         auto = auto_train if auto_train is not None else settings.AUTO_TRAIN_MISSING
         logger.info("🔄 Model-service startup (auto_train=%s)", auto)
 
-        # 1️⃣ try to load whatever already exists
-        await self._try_load("iris_random_forest")
-        await self._try_load("iris_logreg")
+        # Registry-aware load for migrated models
+        self._init_registry_once()
 
-        # 2️⃣ Load bayes – if exists we're done
+        # Try dynamic load first for iris_random_forest
+        loaded_rf = await self._try_load("iris_random_forest")
+        if not loaded_rf and auto:
+            # prefer registry path
+            run_id = await self.train_via_registry("iris_random_forest")
+            if run_id:
+                await self._try_load("iris_random_forest")
+
+        # Legacy deterministic model (to be migrated later)
+        if not await self._try_load("iris_logreg") and auto:
+            logger.info("Training iris logistic-regression (legacy path)…")
+            await asyncio.get_running_loop().run_in_executor(
+                self._EXECUTOR, train_iris_logreg
+            )
+            await self._try_load("iris_logreg")
+
+        # Bayesian path unchanged (will migrate later)
         if not await self._try_load("breast_cancer_bayes"):
-            # 3️⃣ Ensure stub is *synchronously* available
-            if not await self._try_load("breast_cancer_stub"):
+            if not await self._try_load("breast_cancer_stub") and auto:
                 logger.info("Training stub cancer model …")
                 await asyncio.get_running_loop().run_in_executor(
                     self._EXECUTOR, train_breast_cancer_stub
                 )
                 await self._try_load("breast_cancer_stub")
-
-            # 4️⃣ Fire full PyMC build in background unless disabled
-            if not settings.SKIP_BACKGROUND_TRAINING:
-                logger.info("Scheduling full Bayesian retrain in background")
+            if auto and not settings.SKIP_BACKGROUND_TRAINING:
+                logger.info("Scheduling Bayesian retrain in background")
                 asyncio.create_task(
                     self._train_and_reload("breast_cancer_bayes", train_breast_cancer_bayes)
                 )
-
-        # 5️⃣ Train iris models if missing
-        if not await self._try_load("iris_random_forest"):
-            logger.info("Training iris random-forest …")
-            await asyncio.get_running_loop().run_in_executor(
-                self._EXECUTOR, train_iris_random_forest
-            )
-            await self._try_load("iris_random_forest")
-
-        if not await self._try_load("iris_logreg"):
-            logger.info("Training iris logistic-regression …")
-            await asyncio.get_running_loop().run_in_executor(
-                self._EXECUTOR, train_iris_logreg
-            )
-            await self._try_load("iris_logreg")
 
     async def _try_load(self, name: str) -> bool:
         """Try to load a model and update status."""
@@ -1208,6 +1291,21 @@ class ModelService:
             name, trainer = "breast_cancer_stub", TRAINERS["breast_cancer_stub"]
 
         await self._train_and_reload(name, trainer)
+
+    async def train_bayes_cancer_with_params(self, params=None) -> str:
+        """
+        Train Bayesian cancer model with validated parameters.
+        Returns the MLflow run ID.
+        """
+        from app.ml.builtin_trainers import train_breast_cancer_bayes
+
+        # Run training with parameters
+        run_id = train_breast_cancer_bayes(params_obj=params)
+
+        # Reload the model after training
+        await self._try_load("breast_cancer_bayes")
+
+        return run_id
 
     # Predict methods (unchanged from your previous version)
     async def predict_iris(

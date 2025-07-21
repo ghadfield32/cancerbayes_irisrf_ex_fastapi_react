@@ -33,7 +33,7 @@ if (!existsSync(srcPath)) {
 }
 
 try {
-  const targetPath = join(__dirname, '..', 'api', '.env');
+  const targetPath = join(__dirname, '..', '.env');
   copyFileSync(srcPath, targetPath);
   console.log(`✔  switched to ${src}`);
 } catch (error) {

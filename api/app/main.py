@@ -32,7 +32,7 @@ from .security import create_access_token, get_current_user, verify_password
 from .crud import get_user_by_username
 from .schemas.iris import IrisPredictRequest, IrisPredictResponse, IrisFeatures
 from .schemas.cancer import CancerPredictRequest, CancerPredictResponse, CancerFeatures
-from .schemas.train import IrisTrainRequest, CancerTrainRequest
+from .schemas.train import IrisTrainRequest, CancerTrainRequest, BayesTrainRequest, BayesTrainResponse, BayesConfigResponse, BayesRunMetrics
 from .services.ml.model_service import model_service
 from .core.config import settings
 from .deps.limits import default_limit, heavy_limit, login_limit, training_limit, light_limit
@@ -353,6 +353,119 @@ async def train_cancer(
         request.model_type
     )
     return {"status": f"started cancer training ({request.model_type})"}
+
+@app.get("/api/v1/cancer/bayes/config", response_model=BayesConfigResponse)
+async def get_bayes_config(current_user: str = Depends(get_current_user)):
+    """
+    Get Bayesian training configuration for frontend form generation.
+    """
+    from .schemas.bayes import BayesCancerParams
+
+    defaults = BayesCancerParams()
+
+    return BayesConfigResponse(
+        defaults=defaults,
+        bounds={
+            "draws": {"min": 200, "max": 20000},
+            "tune": {"min": 200, "max": 20000},
+            "target_accept": {"min": 0.80, "max": 0.999},
+            "max_rhat_warn": {"min": 1.0, "max": 1.1},
+            "min_ess_warn": {"min": 50, "max": 5000},
+        },
+        descriptions={
+            "draws": "Number of posterior draws retained. More draws = better MCSE but longer runtime.",
+            "tune": "Warmup steps for NUTS adaptation. Should be ≥ 0.2 * draws for good convergence.",
+            "target_accept": "Target acceptance rate. Higher values reduce divergences but increase runtime.",
+            "compute_waic": "Compute Widely Applicable Information Criterion. Fast but may be less robust than LOO.",
+            "compute_loo": "Compute Leave-One-Out cross-validation. More reliable but slower.",
+        },
+        runtime_estimate={
+            "base_seconds_per_sample": 0.001,  # rough estimate
+            "chains": 4,
+            "overhead_seconds": 5.0,  # model setup, data loading, etc.
+        }
+    )
+
+@app.post("/api/v1/cancer/bayes/train", response_model=BayesTrainResponse, dependencies=[Depends(training_limit)])
+async def train_bayes_cancer(
+    request: BayesTrainRequest,
+    background_tasks: BackgroundTasks,
+    current_user: str = Depends(get_current_user)
+):
+    """
+    Train Bayesian cancer model with validated hyperparameters.
+    """
+    if not get_app_ready():
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Backend still loading models. Try again in a moment.",
+            headers={"Retry‑After": "10"},
+        )
+
+    try:
+        if request.async_training:
+            # Queue for background processing
+            job_id = f"bayes_{int(time.time())}"
+            background_tasks.add_task(
+                model_service.train_bayes_cancer_with_params, 
+                request.params
+            )
+            return BayesTrainResponse(
+                run_id="",  # will be set when job completes
+                job_id=job_id,
+                status="queued",
+                message="Training queued for background processing"
+            )
+        else:
+            # Synchronous training
+            run_id = await model_service.train_bayes_cancer_with_params(request.params)
+            return BayesTrainResponse(
+                run_id=run_id,
+                status="completed",
+                message="Training completed successfully"
+            )
+    except Exception as e:
+        logger.error("Bayesian training failed: %s", e)
+        return BayesTrainResponse(
+            run_id="",
+            status="failed",
+            message=str(e)
+        )
+
+@app.get("/api/v1/cancer/bayes/runs/{run_id}", response_model=BayesRunMetrics)
+async def get_bayes_run_metrics(
+    run_id: str,
+    current_user: str = Depends(get_current_user)
+):
+    """
+    Get metrics for a specific Bayesian training run.
+    """
+    try:
+        import mlflow
+        run = mlflow.get_run(run_id)
+        metrics = run.data.metrics
+        params = run.data.params
+
+        warnings = []
+        if metrics.get("rhat_max", 0) > 1.01:
+            warnings.append(f"R-hat exceeds threshold: {metrics['rhat_max']:.4f} > 1.01")
+        if metrics.get("ess_bulk_min", 0) < 400:
+            warnings.append(f"Bulk ESS below threshold: {metrics['ess_bulk_min']:.1f} < 400")
+
+        return BayesRunMetrics(
+            run_id=run_id,
+            accuracy=metrics.get("accuracy", 0.0),
+            rhat_max=metrics.get("rhat_max"),
+            ess_bulk_min=metrics.get("ess_bulk_min"),
+            ess_tail_min=metrics.get("ess_tail_min"),
+            waic=metrics.get("waic"),
+            loo=metrics.get("loo"),
+            status="completed",
+            warnings=warnings
+        )
+    except Exception as e:
+        logger.error("Failed to get run metrics for %s: %s", run_id, e)
+        raise HTTPException(status_code=404, detail=f"Run {run_id} not found or metrics unavailable")
 
 # ----- debug endpoints ----------------------------------
 @app.get("/api/v1/debug/ready")
