@@ -1,0 +1,68 @@
+{
+  "name": "cancer_bayes_iris_fastapi_react_uv",
+  "dockerComposeFile": ["docker-compose.yml"],
+  "service": "datascience",
+  "workspaceFolder": "/workspace",
+  "shutdownAction": "stopCompose",
+
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-python.python",
+        "ms-python.vscode-pylance",
+        "ms-toolsai.jupyter",
+        "ms-toolsai.jupyter-renderers"
+      ],
+      "settings": {
+        "telemetry.telemetryLevel": "off",
+        "python.telemetry.enabled": false,
+        "jupyter.telemetry.enabled": false,
+        "jupyter.experiments.enabled": false,
+        "update.mode": "manual",
+        "extensions.autoUpdate": false,
+        "extensions.autoCheckUpdates": false,
+        "remote.extensionKind": {
+          "ms-python.python": ["ui"],
+          "ms-python.vscode-pylance": ["ui"],
+          "ms-toolsai.jupyter": ["ui"],
+          "ms-toolsai.jupyter-renderers": ["ui"]
+        },
+        "python.defaultInterpreterPath": "/app/.venv/bin/python",
+        "jupyter.interactiveWindow.textEditor.executeSelection": true,
+        "jupyter.widgetScriptSources": ["jsdelivr.com", "unpkg.com"]
+      }
+    }
+  },
+
+  "remoteEnv": {
+    "JUPYTER_ENABLE_LAB": "true",
+    "UV_PROJECT_ENVIRONMENT": "/app/.venv"
+  },
+
+  "postCreateCommand": [
+    "/bin/sh",
+    "-c",
+    "set -eux; \
+    echo '## postCreate: uv bootstrap ##'; \
+    PROJECT_DIR=/workspace; \
+    DEV_DIR=/workspace/.devcontainer; \
+    TARGET_DIR=$([ -f \"$PROJECT_DIR/pyproject.toml\" ] && echo \"$PROJECT_DIR\" || echo \"$DEV_DIR\"); \
+    cd \"$TARGET_DIR\"; \
+    uv --version; \
+    (uv sync --frozen || uv sync); \
+    cd \"$PROJECT_DIR\"; \
+    python - <<'PY'\nimport sys, subprocess\nprint('[postCreate] Ensuring ipykernel present for', sys.executable)\ntry:\n    import ipykernel  # noqa\nexcept Exception:\n    subprocess.check_call([sys.executable, '-m', 'pip', 'install', 'ipykernel'])\nsubprocess.check_call([sys.executable, '-m', 'ipykernel', 'install', '--name', 'uv-app-venv', '--display-name', 'Python (uv /app/.venv)', '--user'])\nprint('[postCreate] ipykernel installed/updated as uv-app-venv')\nPY\n \
+    echo '[postCreate] Installing PyJAGS (post-sync)'; \
+    CPPFLAGS='-include cstdint' uv pip install --no-build-isolation pyjags==1.3.8 || true; \
+    python /workspace/.devcontainer/verify_env.py"
+  ],
+
+  "postStartCommand": [
+    "/bin/sh",
+    "-c",
+    "set -eux; \
+    /workspace/.devcontainer/gpu_bootstrap.sh; \
+    echo \"[postStart] PWD=$(pwd)\"; \
+    python .devcontainer/verify_env.py"
+  ]
+}
