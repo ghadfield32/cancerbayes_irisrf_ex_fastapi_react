@@ -16,10 +16,12 @@ def _msg_box(title: str, body: str) -> None:
 
 def _probe_jax() -> None:
     """
-    Probe JAX availability and devices without relying on private internals.
-    Adds context about import paths and provides actionable, uv-friendly hints.
+    Probe JAX availability and devices; detect duplicate PJRT CUDA packages and
+    mixed CUDA stacks (system + pip nvidia-*), which commonly trigger allocator
+    double-frees inside XLA/PJRT.
     """
-    import importlib, os, textwrap
+    import importlib.util as u
+    import importlib, os, textwrap, subprocess
 
     jp = os.environ.get("JAX_PLATFORM_NAME", "<unset>")
     print(f"   JAX_PLATFORM_NAME: {jp}")
@@ -30,12 +32,12 @@ def _probe_jax() -> None:
         WARN.append(f"jax not importable: {e!r}")
         _msg_box(
             "Action: JAX not importable",
-            "• Ensure JAX is installed into /app/.venv via: uv pip install jax\n"
-            "• Avoid using bare 'pip'; prefer 'uv pip' with UV_PROJECT_ENVIRONMENT=/app/.venv ."
+            "• Install JAX into /app/.venv:\n"
+            "    uv pip install 'jax[cuda12-local]' -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html\n"
+            "• Avoid bare 'pip'; prefer 'uv pip' with UV_PROJECT_ENVIRONMENT=/app/.venv ."
         )
         return
 
-    # Identify import locations
     try:
         jaxlib = importlib.import_module("jaxlib")
         print(f"   jax: {getattr(jax,'__version__','?')} @ {getattr(jax,'__file__','?')}")
@@ -43,7 +45,49 @@ def _probe_jax() -> None:
     except Exception as e:
         WARN.append(f"jaxlib import failed: {e!r}")
 
-    # Device probe (no private APIs)
+    # Detect PJRT packages
+    has_plugin = u.find_spec("jax_cuda12_plugin") is not None
+    has_pjrt   = u.find_spec("jax_cuda12_pjrt") is not None
+    if has_plugin and has_pjrt:
+        WARN.append("Both jax-cuda12-plugin and jax-cuda12-pjrt are installed (conflict).")
+        _msg_box(
+            "Conflict: Two JAX PJRT CUDA backends found",
+            textwrap.dedent("""\
+                You must keep exactly one of these:
+                  • jax-cuda12-plugin  (for LOCAL /usr/local/cuda)
+                  • jax-cuda12-pjrt    (bundled runtime)
+                Recommended (in this image): keep the plugin and remove pjrt:
+                  uv pip uninstall -y jax-cuda12-pjrt
+            """),
+        )
+
+    # Detect pip NVIDIA CUDA stacks if using local plugin
+    def _pip_freeze_contains(prefix: str) -> bool:
+        try:
+            out = subprocess.check_output([os.environ.get("UV_BIN","uv"), "pip", "freeze"], text=True)
+        except Exception:
+            try:
+                out = subprocess.check_output([sys.executable, "-m", "pip", "freeze"], text=True)
+            except Exception:
+                return False
+        return any(line.strip().startswith(prefix) for line in out.splitlines())
+
+    if has_plugin:
+        offending = [p for p in (
+            "nvidia-cuda-runtime-cu12", "nvidia-cudnn-cu12", "nvidia-cublas-cu12",
+            "nvidia-cusolver-cu12", "nvidia-cusparse-cu12", "nvidia-cufft-cu12",
+            "nvidia-curand-cu12", "nvidia-nvtx-cu12", "nvidia-nvjitlink-cu12", "nvidia-cuda-cupti-cu12"
+        ) if _pip_freeze_contains(p)]
+        if offending:
+            WARN.append(f"Local CUDA policy but pip NVIDIA libs present: {', '.join(offending)}")
+            _msg_box(
+                "Mixed CUDA stacks detected",
+                "You're using the local PJRT plugin, but pip-installed NVIDIA CUDA libs are present.\n"
+                "Remove them to avoid duplicate allocators:\n"
+                "  uv pip uninstall -y " + " ".join(offending)
+            )
+
+    # Device probe
     try:
         devs = jax.devices()
         print(f"   jax {getattr(jax,'__version__','?')} devices: {devs}")
@@ -52,9 +96,10 @@ def _probe_jax() -> None:
         _msg_box(
             "Action: Fix JAX GPU backend",
             textwrap.dedent("""\
-                • If you intend to use GPU with CUDA, install the PJRT CUDA plugin:
-                  uv pip install "jax[cuda12]" -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
-                • Ensure installs target /app/.venv (use 'uv pip', not bare 'pip').
+                • Install the PJRT CUDA plugin (local CUDA policy):
+                  uv pip install "jax[cuda12-local]" -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
+                • Ensure only one backend (plugin XOR pjrt) is installed.
+                • Avoid mixing pip 'nvidia-*' CUDA stacks with the system CUDA.
             """),
         )
         return
@@ -68,10 +113,9 @@ def _probe_jax() -> None:
             textwrap.dedent("""\
                 Likely causes (check in order):
                 1) CUDA plugin not installed in this venv:
-                   uv pip install "jax[cuda12]" -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
-                2) Plugin/driver/CUDA version mismatch (common on very new drivers):
-                   uv pip install -U "jax[cuda12]" -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
-                3) Conflicting libraries from other frameworks in a different site-packages.
+                   uv pip install "jax[cuda12-local]" -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
+                2) Backend conflict (both plugin and pjrt installed) — remove one.
+                3) Mixed CUDA stacks (remove pip 'nvidia-*' libs when using local CUDA).
             """),
         )
 

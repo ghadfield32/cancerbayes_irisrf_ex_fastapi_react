@@ -1,5 +1,5 @@
 {
-  "name": "cancer_bayes_iris_fastapi_react_uv",
+  "name": "cancer_bayes_iris_env_uv",
   "dockerComposeFile": ["docker-compose.yml"],
   "service": "datascience",
   "workspaceFolder": "/workspace",
@@ -11,7 +11,8 @@
         "ms-python.python",
         "ms-python.vscode-pylance",
         "ms-toolsai.jupyter",
-        "ms-toolsai.jupyter-renderers"
+        "ms-toolsai.jupyter-renderers",
+        "nvidia.nsight-vscode-edition"
       ],
       "settings": {
         "telemetry.telemetryLevel": "off",
@@ -25,7 +26,8 @@
           "ms-python.python": ["ui"],
           "ms-python.vscode-pylance": ["ui"],
           "ms-toolsai.jupyter": ["ui"],
-          "ms-toolsai.jupyter-renderers": ["ui"]
+          "ms-toolsai.jupyter-renderers": ["ui"],
+          "nvidia.nsight-vscode-edition": ["ui"]
         },
         "python.defaultInterpreterPath": "/app/.venv/bin/python",
         "jupyter.interactiveWindow.textEditor.executeSelection": true,
@@ -34,35 +36,28 @@
     }
   },
 
-  "remoteEnv": {
-    "JUPYTER_ENABLE_LAB": "true",
-    "UV_PROJECT_ENVIRONMENT": "/app/.venv"
+  "containerEnv": {
+    "UV_PROJECT_ENVIRONMENT": "/app/.venv",
+    "NVIDIA_VISIBLE_DEVICES": "all",
+    "NVIDIA_DRIVER_CAPABILITIES": "compute,utility",
+    "CUDA_STACK": "pip-cuda",
+    "LD_PRELOAD": "/usr/lib/x86_64-linux-gnu/libjemalloc.so.2",
+    "MALLOC_ARENA_MAX": "1",
+    "MALLOC_TCACHE_MAX": "0",
+    "PYTORCH_NO_CUDA_MEMORY_CACHING": "1",
+    "XLA_PYTHON_CLIENT_PREALLOCATE": "false",
+    "XLA_PYTHON_CLIENT_MEM_FRACTION": "0.25",
+    "XLA_PYTHON_CLIENT_ALLOCATOR": "platform",
+    "PYTORCH_CUDA_ALLOC_CONF": "max_split_size_mb:512,expandable_segments:True"
   },
 
-  "postCreateCommand": [
-    "/bin/sh",
-    "-c",
-    "set -eux; \
-    echo '## postCreate: uv bootstrap ##'; \
-    PROJECT_DIR=/workspace; \
-    DEV_DIR=/workspace/.devcontainer; \
-    TARGET_DIR=$([ -f \"$PROJECT_DIR/pyproject.toml\" ] && echo \"$PROJECT_DIR\" || echo \"$DEV_DIR\"); \
-    cd \"$TARGET_DIR\"; \
-    uv --version; \
-    (uv sync --frozen || uv sync); \
-    cd \"$PROJECT_DIR\"; \
-    python - <<'PY'\nimport sys, subprocess\nprint('[postCreate] Ensuring ipykernel present for', sys.executable)\ntry:\n    import ipykernel  # noqa\nexcept Exception:\n    subprocess.check_call([sys.executable, '-m', 'pip', 'install', 'ipykernel'])\nsubprocess.check_call([sys.executable, '-m', 'ipykernel', 'install', '--name', 'uv-app-venv', '--display-name', 'Python (uv /app/.venv)', '--user'])\nprint('[postCreate] ipykernel installed/updated as uv-app-venv')\nPY\n \
-    echo '[postCreate] Installing PyJAGS (post-sync)'; \
-    CPPFLAGS='-include cstdint' uv pip install --no-build-isolation pyjags==1.3.8 || true; \
-    python /workspace/.devcontainer/verify_env.py"
-  ],
+  "remoteEnv": {
+    "JUPYTER_ENABLE_LAB": "true",
+    "PATH": "${containerEnv:PATH}:/usr/local/cuda/bin"
+  },
 
-  "postStartCommand": [
-    "/bin/sh",
-    "-c",
-    "set -eux; \
-    /workspace/.devcontainer/gpu_bootstrap.sh; \
-    echo \"[postStart] PWD=$(pwd)\"; \
-    python .devcontainer/verify_env.py"
-  ]
+  "postCreateCommand": "/bin/sh -lc 'set -e; find .devcontainer -maxdepth 1 -name \"*.sh\" -exec sed -i \"s/\\r$//\" {} \\;; chmod +x .devcontainer/*.sh; bash .devcontainer/opening.sh'",
+  "postStartCommand": "/bin/sh -lc 'set -e; find .devcontainer -maxdepth 1 -name \"*.sh\" -exec sed -i \"s/\\r$//\" {} \\;; chmod +x .devcontainer/*.sh; bash .devcontainer/opening.sh --verify-only || true'"
 }
+
+

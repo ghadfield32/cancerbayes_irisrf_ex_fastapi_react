@@ -23,19 +23,19 @@ _saved_env_files: List[str] = []
 def _parse_port(port: Union[str, int, None]) -> Optional[int]:
     """
     Parse and validate a port number.
-    
+
     Args:
         port: Port number as string or int, or None
-        
+
     Returns:
         Validated port number as int, or None if input was None
-        
+
     Raises:
         ValueError: If port is invalid or out of range
     """
     if port is None:
         return None
-        
+
     try:
         port_int = int(port)
         if not (0 < port_int < 65536):
@@ -96,11 +96,11 @@ def _port_free(host: str, port: int, timeout: float = 0.1) -> bool:
 def _find_port(preferred: int, start: int = 5200) -> int:
     """
     Try to use preferred port, fall back to finding first available port.
-    
+
     Args:
         preferred: The preferred port number to try first
         start: Where to start searching if preferred port is taken
-        
+
     Returns:
         An available port number
     """
@@ -114,7 +114,7 @@ def _write_envfile(name: str,
                    ports: Optional[dict[str, int]] = None) -> pathlib.Path:
     """
     Create a throw-away .env file for the current `invoke up` run.
-    
+
     Docker-compose will use this to see the chosen host-ports. We include all
     services we know about; anything unset falls back to .env.template defaults.
     """
@@ -178,7 +178,7 @@ def _compose(
                 sys.exit(1)
 
     env = {**os.environ, "ENV_NAME": name, "COMPOSE_PROJECT_NAME": name}
-    
+
     # Add port overrides if provided
     if ports:
         port_mapping = {
@@ -190,7 +190,7 @@ def _compose(
         for service, port in ports.items():
             if service in port_mapping:
                 env[port_mapping[service]] = str(port)
-    
+
     use_pty = force_pty or (os.name != "nt" and sys.stdin.isatty())
 
     if not use_pty and not getattr(_compose, "_warned", False):
@@ -421,10 +421,10 @@ def down(c, name: str | None = None, all: bool = False, rmi: str = "local"):
 def dashboard(c, yaml: str, port: int = 8150, host: str = "0.0.0.0") -> None:
     """
     Serve a saved ExplainerDashboard from a YAML configuration file.
-    
+
     This task allows you to re-serve dashboards that were previously saved
     with build_and_log_dashboard(save_yaml=True).
-    
+
     Examples:
         invoke dashboard --yaml dashboard.yaml
         invoke dashboard --yaml dashboard.yaml --port 8200
@@ -432,24 +432,24 @@ def dashboard(c, yaml: str, port: int = 8150, host: str = "0.0.0.0") -> None:
     import sys
     from pathlib import Path
     from src.mlops.explainer import load_dashboard_yaml
-    
+
     yaml_path = Path(yaml)
     if not yaml_path.exists():
         print(f"❌ Dashboard YAML file not found: {yaml_path}")
         sys.exit(1)
-    
+
     # Check if port is available
     if not _port_free(host, port):
         print(f"❌ Port {port} is already in use on {host}")
         sys.exit(1)
-    
+
     try:
         print(f"🔄 Loading dashboard from {yaml_path}")
         dashboard_obj = load_dashboard_yaml(yaml_path)
-        
+
         print(f"🌐 Serving ExplainerDashboard on {host}:{port}")
         dashboard_obj.run(port=port, host=host, use_waitress=True, open_browser=False)
-        
+
     except Exception as e:
         print(f"❌ Failed to load or serve dashboard: {e}")
         sys.exit(1)

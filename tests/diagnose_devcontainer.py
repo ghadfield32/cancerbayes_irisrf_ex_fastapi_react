@@ -31,16 +31,16 @@ def check_paths_and_environment():
     """Check Python paths and environment variables."""
     print("\n🐍 PYTHON ENVIRONMENT DIAGNOSTICS")
     print("=" * 60)
-    
+
     # Python executable and version
     print(f"Python executable: {sys.executable}")
     print(f"Python version: {sys.version}")
     print(f"Python path: {sys.path[:3]}...")  # First few paths
-    
+
     # Environment variables
     print(f"\nVIRTUAL_ENV: {os.environ.get('VIRTUAL_ENV', 'Not set')}")
     print(f"PATH (first 3): {':'.join(os.environ.get('PATH', '').split(':')[:3])}")
-    
+
     # Virtual environment validation
     venv_path = Path('/app/.venv')
     if venv_path.exists():
@@ -55,12 +55,12 @@ def check_key_packages():
     """Check if key packages are importable."""
     print("\n📦 PACKAGE IMPORT TESTS")
     print("=" * 60)
-    
+
     packages = [
         'jax', 'torch', 'numpy', 'pandas', 'matplotlib', 
         'jupyterlab', 'streamlit', 'sklearn'
     ]
-    
+
     for package in packages:
         try:
             if package == 'sklearn':
@@ -80,7 +80,7 @@ def check_gpu_environment():
     """Check GPU-related environment variables."""
     print("\n🎮 GPU ENVIRONMENT VARIABLES")
     print("=" * 60)
-    
+
     gpu_env_vars = [
         'XLA_PYTHON_CLIENT_PREALLOCATE',
         'XLA_PYTHON_CLIENT_ALLOCATOR', 
@@ -94,7 +94,7 @@ def check_gpu_environment():
         'NVIDIA_VISIBLE_DEVICES',
         'NVIDIA_DRIVER_CAPABILITIES'
     ]
-    
+
     for var in gpu_env_vars:
         value = os.environ.get(var, 'Not set')
         print(f"   {var}: {value}")
@@ -104,22 +104,22 @@ def check_gpu_support():
     """Check GPU support for JAX and PyTorch with enhanced diagnostics."""
     print("\n🎮 ENHANCED GPU SUPPORT CHECK")
     print("=" * 60)
-    
+
     # JAX GPU check with detailed info
     try:
         import jax
         print(f"JAX version: {jax.__version__}")
-        
+
         devices = jax.devices()
         print(f"JAX devices: {devices}")
-        
+
         if devices:
             for i, device in enumerate(devices):
                 print(f"   Device {i}: {device}")
-                
+
         if any('gpu' in str(device).lower() or 'cuda' in str(device).lower() for device in devices):
             print("✅ JAX GPU/CUDA support detected!")
-            
+
             # Test a simple computation
             try:
                 import jax.numpy as jnp
@@ -131,20 +131,20 @@ def check_gpu_support():
         else:
             print("⚠️  JAX GPU support not detected")
             print("   This might be due to GPU architecture compatibility")
-            
+
     except Exception as e:
         print(f"❌ JAX GPU check failed: {e}")
-    
+
     # PyTorch GPU check with enhanced info
     try:
         import torch
         print(f"\nPyTorch version: {torch.__version__}")
         print(f"PyTorch CUDA available: {torch.cuda.is_available()}")
-        
+
         if torch.cuda.is_available():
             device_count = torch.cuda.device_count()
             print(f"✅ PyTorch CUDA device count: {device_count}")
-            
+
             for i in range(device_count):
                 try:
                     device_name = torch.cuda.get_device_name(i)
@@ -153,7 +153,7 @@ def check_gpu_support():
                     print(f"     Total memory: {memory_total / (1024**3):.1f} GB")
                 except Exception as e:
                     print(f"   Device {i}: Error getting info - {e}")
-            
+
             # Test a simple computation
             try:
                 device = torch.device('cuda:0')
@@ -165,7 +165,7 @@ def check_gpu_support():
         else:
             print("⚠️  PyTorch CUDA not available")
             print("   Check CUDA installation and GPU compatibility")
-            
+
     except Exception as e:
         print(f"❌ PyTorch GPU check failed: {e}")
 
@@ -174,14 +174,14 @@ def check_workspace_mount():
     """Check if workspace is properly mounted."""
     print("\n📁 WORKSPACE MOUNT CHECK")
     print("=" * 60)
-    
+
     workspace_path = Path('/workspace')
     if workspace_path.exists():
         print(f"✅ /workspace directory exists")
         try:
             contents = list(workspace_path.iterdir())[:10]  # First 10 items
             print(f"   Contents (first 10): {[p.name for p in contents]}")
-            
+
             # Check for specific expected files
             expected_files = ['.devcontainer', 'pyproject.toml', 'docker-compose.yml']
             for file in expected_files:
@@ -199,7 +199,7 @@ def check_dev_container_config():
     """Check dev container configuration."""
     print("\n⚙️  DEV CONTAINER CONFIG CHECK")
     print("=" * 60)
-    
+
     config_path = Path('/workspace/.devcontainer/devcontainer.json')
     if config_path.exists():
         print("✅ devcontainer.json found")
@@ -222,14 +222,14 @@ def main():
     print(f"Running from: {os.getcwd()}")
     print(f"User: {os.getenv('USER', 'unknown')}")
     print(f"Container hostname: {os.getenv('HOSTNAME', 'unknown')}")
-    
+
     # System commands
     run_command("uv --version", "UV Version")
     run_command("which python", "Python Location")
     run_command("ls -la /app/.venv/", "Virtual Environment Contents")
     run_command("mount | grep workspace", "Workspace Mount Status")
     run_command("nvidia-smi", "NVIDIA GPU Status")
-    
+
     # Python-based checks
     check_paths_and_environment()
     check_gpu_environment()
@@ -237,7 +237,7 @@ def main():
     check_gpu_support()
     check_workspace_mount()
     check_dev_container_config()
-    
+
     print("\n" + "=" * 80)
     print("🎯 SUMMARY & RECOMMENDATIONS")
     print("=" * 80)
