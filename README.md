@@ -23,7 +23,103 @@ Follow the steps below to run everything locally with **Railway CLI** and then d
 
 ---
 
-## ⚙️ Configuration System
+
+### ⚡ Local GPU + Devcontainer (PyTorch / JAX / YOLO)
+
+### ✅ Basic Requirements
+
+* **NVIDIA GPU + recent drivers**
+* **Docker Desktop** (with **WSL2** on Windows)
+* **NVIDIA Container Toolkit** (CUDA in containers)
+* **VS Code** + **Dev Containers** extension
+* **Python 3.10+** and **[`uv`](https://docs.astral.sh/uv/)** installed locally (optional, for venv-first workflow)
+
+---
+
+### 📦 (Optional) Local venv with `uv` *before* opening the devcontainer
+
+1. **Ensure `pyproject.toml` is in the repo root** (so `uv` can resolve deps). Minimal example:
+
+```toml
+[project]
+name = "ml-fullstack"
+version = "0.1.0"
+requires-python = ">=3.10"
+dependencies = [
+  "ipykernel",
+  "numpy",
+  "pandas",
+  "matplotlib",
+  "jax[cuda12]>=0.4.28; platform_system!='Windows'",  # adjust per platform
+  "torch",                                           # or torch==<your-version>
+  "ultralytics",                                     # YOLO
+]
+
+[tool.uv]  # optional: uv settings go here
+```
+
+2. **Sync and activate**:
+
+```bash
+# From repo root
+uv sync               # creates .venv and installs deps from pyproject.toml
+```
+
+
+4. **Run** `notebooks/5080_gpu` or `notebooks/4090_gpu` using the `local-venv` kernel to validate GPU, then proceed to the devcontainer steps below.
+
+---
+
+### 🔌 Use your GPU **inside** the devcontainer
+
+1. **Pick the right GPU notebook**
+
+* Open **`notebooks/5080_gpu`** *or* **`notebooks/4090_gpu`** (match your card).
+* Run the notebook to prep settings and confirm device visibility.
+
+2. **Configure `.env`**
+
+* Open **`.devcontainer/.env.template`**:
+
+  * **Ctrl+H** → replace all `env_name` with your desired container name.
+  * Add/adjust any API keys.
+* Copy to `.env`:
+
+```bash
+cd .devcontainer
+cp .env.template .env
+```
+
+3. **Rebuild & start the devcontainer**
+
+```bash
+cd .devcontainer
+docker compose down
+docker compose build --no-cache
+docker compose up -d
+```
+
+* Reopen in container via **Dev Containers** (Ctrl+Alt+P → *Reopen in Container*),
+  or attach a shell:
+
+```bash
+docker exec -it <your-env_name> bash
+```
+
+
+4. **Verify GPU access (optional)**
+
+```bash
+python .devcontainer/validate_gpu.py   # checks CUDA + torch
+```
+
+> Notes: You need NVIDIA drivers, Docker Desktop, and NVIDIA Container Toolkit for GPU passthrough (WSL2 on Windows).
+-------------------
+
+
+
+
+# ⚙️ Frontend and Backend Configuration System
 
 The repository uses a centralized `config.yaml` system that controls all aspects of the application:
 
