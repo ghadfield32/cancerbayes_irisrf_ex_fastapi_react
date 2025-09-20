@@ -1,8 +1,8 @@
 # .devcontainer/Dockerfile - Optimized for faster builds
 ARG CUDA_TAG=12.8.0
 # Use NVIDIA's runtime image with pre-installed CUDA libraries (saves 1+ GB downloads)
-FROM nvidia/cuda:${CUDA_TAG}-runtime-ubuntu22.04 as runtime-base
-FROM nvidia/cuda:${CUDA_TAG}-devel-ubuntu22.04
+FROM nvidia/cuda:${CUDA_TAG}-runtime-ubuntu22.04 AS runtime-base
+FROM nvidia/cuda:${CUDA_TAG}-devel-ubuntu22.04 AS build
 
 ARG PYTHON_VER=3.10
 ARG ENV_NAME=cancer_bayes_iris_env
